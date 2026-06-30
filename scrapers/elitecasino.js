@@ -12,47 +12,64 @@ async function scrape(c,df,dt,cp){
     await p.setViewport({width:1280,height:800});
     await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
     
-    // Login
     await p.goto(b+'/signin.php',{waitUntil:'networkidle2',timeout:45000});
     await new Promise(r=>setTimeout(r,3000));
     
+    // STEP 1: Handle "are you a robot?" - find ALL clickable elements and check them
+    const robotHandled=await p.evaluate(()=>{
+      // Find all checkboxes and click them
+      const cbs=document.querySelectorAll('input[type="checkbox"]');
+      cbs.forEach(cb=>{if(!cb.checked)cb.click()});
+      
+      // Find any element with "robot" text and click nearby inputs
+      const allElements=document.querySelectorAll('*');
+      for(const el of allElements){
+        if(el.innerText&&el.innerText.toLowerCase().includes('robot')&&el.tagName!=='SCRIPT'){
+          // Click the element itself
+          el.click();
+          // Find nearby checkbox/input
+          const parent=el.closest('div,label,span,p,li');
+          if(parent){
+            const inp=parent.querySelector('input');
+            if(inp)inp.click();
+          }
+          break;
+        }
+      }
+      return document.querySelectorAll('input[type="checkbox"]').length;
+    });
+    console.log('Robot checkboxes found:',robotHandled);
+    await new Promise(r=>setTimeout(r,2000));
+    
+    // STEP 2: Get full HTML to see what's on page
+    const formHTML=await p.evaluate(()=>{
+      const form=document.querySelector('form');
+      return form?form.innerHTML.substring(0,1000):'NO FORM';
+    });
+    console.log('Form HTML:',formHTML);
+    
+    // STEP 3: Type credentials
     await p.waitForSelector('input[name="username"]',{timeout:10000});
-    
-    // Check for robot/captcha field
-    const robotCheck=await p.$('input[name="captcha"],input[name="robot"],input[type="checkbox"],.captcha,#captcha');
-    if(robotCheck){console.log('Robot check found, clicking...');await robotCheck.click();await new Promise(r=>setTimeout(r,1000));}
-    
-    // Type slowly like human
     await p.type('input[name="username"]',c.username,{delay:100});
-    await new Promise(r=>setTimeout(r,1500));
+    await new Promise(r=>setTimeout(r,1000));
     await p.type('input[name="password"]',c.password,{delay:100});
     await new Promise(r=>setTimeout(r,2000));
     
-    // Try clicking "I'm not a robot" or similar
-    try{
-      const notRobot=await p.$x("//label[contains(text(),'robot')]|//span[contains(text(),'robot')]|//input[contains(@name,'human')]");
-      if(notRobot.length>0){await notRobot[0].click();await new Promise(r=>setTimeout(r,1000));}
-    }catch(e){}
-    
-    // Submit
+    // STEP 4: Submit
     try{
       await Promise.all([
         p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}),
-        p.click('input[type="submit"], button[type="submit"]')
+        p.click('input[type="submit"],button[type="submit"]')
       ]);
     }catch(e){
       await Promise.all([
         p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}),
-        p.evaluate(()=>{
-          const forms=document.querySelectorAll('form');
-          for(const f of forms){if(f.querySelector('input[name="password"]')){f.submit();return;}}
-        })
+        p.evaluate(()=>document.querySelector('form').submit())
       ]);
     }
     
     await new Promise(r=>setTimeout(r,3000));
     const url=p.url();
-    console.log('Post-login URL:',url);
     
     if(url.includes('signin')){
       const pageText=await p.evaluate(()=>document.body.innerText.substring(0,500));
@@ -60,13 +77,10 @@ async function scrape(c,df,dt,cp){
     }
     
     console.log('Login OK!');
-    
-    // Fetch report
     const sd=new Date(df+'T00:00:00'),ed=new Date(dt+'T00:00:00'),ds=Math.ceil((ed-sd)/864e5)+1;
     let ah=null,ar=[];
     if(ds<=35){const r=await fr(p,b,df,dt,true);ah=r.headers;ar=r.rows}
     else{let cs=new Date(sd);while(cs<=ed){const ce=new Date(cs.getFullYear(),cs.getMonth()+1,0);if(ce>ed)ce.setTime(ed.getTime());const r=await fr(p,b,fmt(cs),fmt(ce),false);if(!ah&&r.headers)ah=r.headers;ar=ar.concat(r.rows);cs=new Date(cs.getFullYear(),cs.getMonth()+1,1)}}
-    
     const dd=[];ar.forEach(r=>{if(dd.length>0){const l=dd[dd.length-1];if(r.length===l.length&&r.every((c,i)=>c===l[i]))return}dd.push(r)});
     return{headers:ah||[],rows:dd};
   }finally{if(br)await br.close()}
