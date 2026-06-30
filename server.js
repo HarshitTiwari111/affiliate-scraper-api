@@ -6,9 +6,9 @@ app.use(express.json());
 
 // Only the two scrapers that can work without bypassing CAPTCHA/2FA
 const ec = require('./scrapers/elitecasino');
-const bm = require('./scrapers/betmen');
+const bm = require('./scrapers/cellxpert');
 
-app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen'] }));
+app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'cellxpert'] }));
 app.get('/health', (q, r) => r.json({ status: 'ok', chrome: CHROME }));
 
 app.get('/myip', async (q, r) => {
@@ -28,7 +28,7 @@ app.post('/scrape', async (q, r) => {
     let result;
     switch (platform) {
       case 'elitecasino': result = await ec.scrape(credentials, dateFrom, dateTo, CHROME); break;
-      case 'betmen':      result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'cellxpert':      result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
       default: return r.status(400).json({ error: 'Unknown or unsupported platform: ' + platform });
     }
     r.json({ success: true, headers: result.headers, rows: result.rows });
