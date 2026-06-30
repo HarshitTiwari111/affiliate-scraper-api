@@ -9,6 +9,13 @@ const vp=require('./scrapers/vpartners');
 const sp=require('./scrapers/starzpartners');
 app.get('/',(q,r)=>r.json({status:'ok'}));
 app.get('/health',(q,r)=>r.json({status:'ok',chrome:CHROME}));
+app.get('/myip',async(q,r)=>{
+  try{
+    const resp=await fetch('https://api.ipify.org?format=json');
+    const data=await resp.json();
+    r.json({ip:data.ip});
+  }catch(e){r.json({error:e.message})}
+});
 app.post('/scrape',async(q,r)=>{
   const{platform,dateFrom,dateTo,credentials}=q.body;
   if(!platform||!dateFrom||!dateTo||!credentials)return r.status(400).json({error:'Missing fields'});
