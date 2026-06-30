@@ -4,13 +4,13 @@
 //
 // Flow:
 //   1. POST client_id + client_secret + grant_type + scope -> /oauth/access_token
-//   2. POST with Bearer token -> /statistics.php?...&mode=csv&dnl=1  (returns CSV)
+//   2. GET with Bearer token -> /statistics.php?...&mode=csv&dnl=1  (returns CSV)
 //   3. Parse CSV -> { headers, rows }
 //
 // Credentials (Dashboards sheet):
-//   c.clientId / c.username     -> Client identifier
-//   c.clientSecret / c.password -> Client secret
-//   c.baseUrl                   -> https://affiliates.elitecasinopartners.ag
+//   c.clientId / c.username     -> Client identifier (Col C)
+//   c.clientSecret / c.password -> Client secret     (Col J)
+//   c.baseUrl                   -> https://affiliates.elitecasinopartners.ag (Col H baseUrl:...)
 // ============================================================
 
 async function scrape(c, df, dt, cp) {
@@ -51,12 +51,13 @@ async function scrape(c, df, dt, cp) {
     throw new Error('Elite Casino OAuth token error: ' + e.message);
   }
 
-  // ---- Step 2: Download statistics as CSV (POST + Bearer) ----
-  console.log('  -> Downloading statistics CSV...');
+  // ---- Step 2: Download statistics as CSV ----
+  // Docs curl uses only the Bearer header (no -d / no -X) => GET request.
   const sd = new Date(df + 'T00:00:00'), ed = new Date(dt + 'T00:00:00');
   const daySpan = Math.ceil((ed - sd) / 864e5) + 1;
-  const showDaily = daySpan <= 366 ? 1 : 0; // daily breakdown for up to a year
+  const showDaily = daySpan <= 366 ? 1 : 0;
 
+  // Param order matches the docs example exactly: d1, d2, sd, mode, sbm, dnl
   const statsUrl = base + '/statistics.php'
     + '?d1=' + encodeURIComponent(df)
     + '&d2=' + encodeURIComponent(dt)
@@ -65,15 +66,18 @@ async function scrape(c, df, dt, cp) {
     + '&sbm=1'
     + '&dnl=1';
 
-  const sr = await fetch(statsUrl, {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Accept': 'text/csv'
-    }
-  });
-  const csvText = await sr.text();
-  if (!sr.ok) throw new Error('Stats download failed (' + sr.status + '): ' + csvText.substring(0, 300));
+  console.log('  -> Downloading statistics (GET):', statsUrl);
+  let csvText = await tryStats(statsUrl, token, 'GET');
+
+  // Fallback: if GET gave a 400, retry as POST (some installs differ)
+  if (csvText.__error && csvText.status === 400) {
+    console.log('  -> GET returned 400, retrying as POST...');
+    csvText = await tryStats(statsUrl, token, 'POST');
+  }
+
+  if (csvText.__error) {
+    throw new Error('Stats download failed (' + csvText.status + '): ' + (csvText.body || '').substring(0, 300));
+  }
 
   // If we got an HTML login page instead of CSV, token/scope problem
   if (/<html|<!doctype/i.test(csvText.substring(0, 200))) {
@@ -87,6 +91,16 @@ async function scrape(c, df, dt, cp) {
   }
   console.log('  OK Got', parsed.rows.length, 'rows');
   return parsed;
+}
+
+async function tryStats(url, token, method) {
+  const resp = await fetch(url, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'text/csv' }
+  });
+  const body = await resp.text();
+  if (!resp.ok) return { __error: true, status: resp.status, body };
+  return body;
 }
 
 // Minimal RFC-4180-ish CSV parser (handles quoted fields, commas, newlines)
@@ -114,8 +128,6 @@ function parseCsv(text) {
   if (!records.length) return { headers: [], rows: [] };
   const headers = records[0].map(h => h.trim());
   let rows = records.slice(1).filter(r => r.some(c => c && c.trim().length));
-
-  // Drop trailing "Total" summary row if present
   rows = rows.filter(r => (r[0] || '').trim().toLowerCase() !== 'total');
 
   return { headers, rows };
