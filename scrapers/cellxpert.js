@@ -14,20 +14,32 @@ async function scrape(c,df,dt,cp){
     await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
     
     console.log('  → Loading Betmen...');
-    await p.goto(baseUrl+'/partner/login',{waitUntil:'networkidle2',timeout:45000});
-    await new Promise(r=>setTimeout(r,5000));
+    await p.goto(baseUrl+'/partner/login',{waitUntil:'networkidle2',timeout:60000});
+    
+    // Wait for Angular to render login form
+    console.log('  → Waiting for Angular form...');
+    try{
+      await p.waitForSelector('input[type="password"],input[type="email"],input[type="text"]',{timeout:30000});
+      console.log('  → Form found!');
+    }catch(e){
+      console.log('  → Form not found after 30s, retrying page load...');
+      await p.reload({waitUntil:'networkidle2',timeout:60000});
+      await p.waitForSelector('input[type="password"],input[type="email"],input[type="text"]',{timeout:30000});
+    }
+    
+    await new Promise(r=>setTimeout(r,2000));
     
     // Log page state
     const pageInfo=await p.evaluate(()=>{
       const inputs=document.querySelectorAll('input');
       const info=[];
       inputs.forEach(i=>info.push(i.type+'|'+i.name+'|'+(i.placeholder||'')));
-      return{text:document.body.innerText.substring(0,200),inputs:info,url:location.href};
+      return{inputs:info,url:location.href};
     });
     console.log('  → URL:',pageInfo.url);
     console.log('  → Inputs:',JSON.stringify(pageInfo.inputs));
     
-    // Fill username - Angular way (set value + dispatch events)
+    // Fill username - Angular way
     await p.evaluate((username)=>{
       const inputs=document.querySelectorAll('input:not([type="hidden"]):not([type="password"])');
       for(const inp of inputs){
@@ -42,12 +54,10 @@ async function scrape(c,df,dt,cp){
       }
     },c.username||'');
     
-    await new Promise(r=>setTimeout(r,500));
-    
-    // Also type it for safety
+    // Also type for safety
     const emailInput=await p.$('input[type="email"],input[type="text"],input[name="email"],input[placeholder*="mail"],input[placeholder*="user"]');
     if(emailInput){
-      await emailInput.click({clickCount:3}); // select all
+      await emailInput.click({clickCount:3});
       await emailInput.type(c.username||'',{delay:50});
     }
     
@@ -65,9 +75,6 @@ async function scrape(c,df,dt,cp){
       }
     },c.password||'');
     
-    await new Promise(r=>setTimeout(r,500));
-    
-    // Also type it
     const passInput=await p.$('input[type="password"]');
     if(passInput){
       await passInput.click({clickCount:3});
@@ -76,25 +83,22 @@ async function scrape(c,df,dt,cp){
     
     await new Promise(r=>setTimeout(r,2000));
     
-    // Submit - try button click then Enter
+    // Submit
     const submitted=await p.evaluate(()=>{
       const btn=document.querySelector('button[type="submit"],button.btn-primary,button.login-btn,input[type="submit"]');
       if(btn){btn.click();return 'button:'+btn.innerText}
       return null;
     });
-    console.log('  → Submit:',submitted||'no button found, pressing Enter');
+    console.log('  → Submit:',submitted||'no button, pressing Enter');
     if(!submitted)await p.keyboard.press('Enter');
     
-    // Wait for navigation
     await new Promise(r=>setTimeout(r,10000));
     
     const finalUrl=p.url();
     console.log('  → Final URL:',finalUrl);
     
-    // Check login result
-    if(finalUrl.includes('/partner/login')||finalUrl.includes('/login')){
+    if(finalUrl.includes('/partner/login')){
       const txt=await p.evaluate(()=>document.body.innerText.substring(0,300));
-      // Maybe credentials wrong or Angular didn't submit
       throw new Error('Login failed. URL: '+finalUrl+' Page: '+txt.substring(0,150));
     }
     
