@@ -23,7 +23,7 @@ app.post('/scrape',async(q,r)=>{
     let result;
     switch(platform){
       case 'elitecasino':result=await ec.scrape(credentials,dateFrom,dateTo,CHROME);break;
-      case 'cellxpert':result=await cx.scrape(credentials,dateFrom,dateTo);break;
+      case 'cellxpert':result=await cx.scrape(credentials,dateFrom,dateTo,CHROME);break;
       case 'vpartners':result=await vp.scrape(credentials,dateFrom,dateTo,CHROME);break;
       case 'starzpartners':result=await sp.scrape(credentials,dateFrom,dateTo,CHROME);break;
       default:return r.status(400).json({error:'Unknown: '+platform});
