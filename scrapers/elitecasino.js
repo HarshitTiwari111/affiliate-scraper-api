@@ -10,44 +10,53 @@ async function scrape(c,df,dt,cp){
       args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process']});
     const p=await br.newPage();
     await p.setViewport({width:1280,height:800});
+    await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
     
     // Login
     await p.goto(b+'/signin.php',{waitUntil:'networkidle2',timeout:45000});
-    await new Promise(r=>setTimeout(r,2000)); // Wait for Cloudflare
+    await new Promise(r=>setTimeout(r,3000));
     
-    // Type credentials
     await p.waitForSelector('input[name="username"]',{timeout:10000});
-    await p.type('input[name="username"]',c.username,{delay:50});
-    await p.type('input[name="password"]',c.password,{delay:50});
     
-    // Click submit button (not form.submit)
-    await new Promise(r=>setTimeout(r,500));
+    // Check for robot/captcha field
+    const robotCheck=await p.$('input[name="captcha"],input[name="robot"],input[type="checkbox"],.captcha,#captcha');
+    if(robotCheck){console.log('Robot check found, clicking...');await robotCheck.click();await new Promise(r=>setTimeout(r,1000));}
+    
+    // Type slowly like human
+    await p.type('input[name="username"]',c.username,{delay:100});
+    await new Promise(r=>setTimeout(r,1500));
+    await p.type('input[name="password"]',c.password,{delay:100});
+    await new Promise(r=>setTimeout(r,2000));
+    
+    // Try clicking "I'm not a robot" or similar
+    try{
+      const notRobot=await p.$x("//label[contains(text(),'robot')]|//span[contains(text(),'robot')]|//input[contains(@name,'human')]");
+      if(notRobot.length>0){await notRobot[0].click();await new Promise(r=>setTimeout(r,1000));}
+    }catch(e){}
+    
+    // Submit
     try{
       await Promise.all([
         p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}),
-        p.click('input[type="submit"], button[type="submit"], .btn-login, #login-btn')
+        p.click('input[type="submit"], button[type="submit"]')
       ]);
     }catch(e){
-      // Fallback: try form submit
       await Promise.all([
         p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}),
         p.evaluate(()=>{
           const forms=document.querySelectorAll('form');
           for(const f of forms){if(f.querySelector('input[name="password"]')){f.submit();return;}}
-          document.querySelector('form').submit();
         })
       ]);
     }
     
-    await new Promise(r=>setTimeout(r,2000));
+    await new Promise(r=>setTimeout(r,3000));
     const url=p.url();
     console.log('Post-login URL:',url);
     
     if(url.includes('signin')){
-      // Get page content for debugging
       const pageText=await p.evaluate(()=>document.body.innerText.substring(0,500));
-      console.log('Page text:',pageText);
-      throw new Error('Login failed. Page: '+pageText.substring(0,200));
+      throw new Error('Login failed. Page: '+pageText.substring(0,300));
     }
     
     console.log('Login OK!');
