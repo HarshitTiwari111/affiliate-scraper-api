@@ -47,7 +47,7 @@ async function scrape(c,df,dt,cp){
       // Get page content for debugging
       const pageText=await p.evaluate(()=>document.body.innerText.substring(0,500));
       console.log('Page text:',pageText);
-      throw new Error('Login failed - still on signin page. Check credentials.');
+      throw new Error('Login failed. Page: '+pageText.substring(0,200));
     }
     
     console.log('Login OK!');
