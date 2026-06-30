@@ -22,7 +22,7 @@ async function scrapeDashboard(c,df,dt,cp){
     // Go to login
     console.log('  → Loading Betmen login...');
     await p.goto(baseUrl+'/partner/',{waitUntil:'networkidle2',timeout:45000});
-    await new Promise(r=>setTimeout(r,3000));
+   await new Promise(r=>setTimeout(r,6000));
     
     // Wait for Angular to render
     await p.waitForSelector('input[type="email"],input[type="text"],input[name="email"],input[name="username"]',{timeout:15000});
@@ -52,11 +52,11 @@ async function scrapeDashboard(c,df,dt,cp){
     console.log('  → Current URL:',p.url());
     
     // Navigate to reports/statistics
-    const reportPaths=['/partner/reports','/partner/statistics','/partner/dashboard'];
+const reportPaths=['/partner/reports/media','/partner/reports/earnings','/partner/reports/registrations','/partner/reports'];
     for(const rp of reportPaths){
       try{
         await p.goto(baseUrl+rp,{waitUntil:'networkidle2',timeout:20000});
-        await new Promise(r=>setTimeout(r,3000));
+       await new Promise(r=>setTimeout(r,6000));
         const hasData=await p.evaluate(()=>{
           return document.querySelectorAll('table').length>0||
                  document.querySelectorAll('[class*="table"],[class*="grid"],[class*="report"]').length>0;
