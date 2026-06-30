@@ -13,81 +13,96 @@ async function scrape(c,df,dt,cp){
     await p.setViewport({width:1280,height:800});
     await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
     
-    console.log('  → Loading Betmen login...');
+    console.log('  → Loading Betmen...');
     await p.goto(baseUrl+'/partner/login',{waitUntil:'networkidle2',timeout:45000});
-    await new Promise(r=>setTimeout(r,5000)); // Angular render wait
+    await new Promise(r=>setTimeout(r,5000));
     
-    // Log what's on page
-    const pageContent=await p.evaluate(()=>document.body.innerText.substring(0,300));
-    console.log('  → Page:',pageContent.substring(0,100));
+    // Log page state
+    const pageInfo=await p.evaluate(()=>{
+      const inputs=document.querySelectorAll('input');
+      const info=[];
+      inputs.forEach(i=>info.push(i.type+'|'+i.name+'|'+(i.placeholder||'')));
+      return{text:document.body.innerText.substring(0,200),inputs:info,url:location.href};
+    });
+    console.log('  → URL:',pageInfo.url);
+    console.log('  → Inputs:',JSON.stringify(pageInfo.inputs));
     
-    // Try multiple input selectors for Angular
-    const inputSelectors=[
-      'input[type="email"]','input[type="text"]','input[name="email"]',
-      'input[name="username"]','input[name="login"]','input[formcontrolname="email"]',
-      'input[formcontrolname="username"]','input[formcontrolname="login"]',
-      'input[placeholder*="mail"]','input[placeholder*="user"]','input[placeholder*="login"]'
-    ];
-    
-    let emailFilled=false;
-    for(const sel of inputSelectors){
-      const el=await p.$(sel);
-      if(el){
-        await el.click();
-        await el.type(c.username||c.apiKey||'',{delay:80});
-        console.log('  → Username filled with:',sel);
-        emailFilled=true;
-        break;
+    // Fill username - Angular way (set value + dispatch events)
+    await p.evaluate((username)=>{
+      const inputs=document.querySelectorAll('input:not([type="hidden"]):not([type="password"])');
+      for(const inp of inputs){
+        if(inp.type==='email'||inp.type==='text'||inp.name.includes('email')||inp.name.includes('user')||inp.name.includes('login')||inp.placeholder.toLowerCase().includes('email')||inp.placeholder.toLowerCase().includes('user')){
+          inp.focus();
+          inp.value=username;
+          inp.dispatchEvent(new Event('input',{bubbles:true}));
+          inp.dispatchEvent(new Event('change',{bubbles:true}));
+          inp.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+          break;
+        }
       }
-    }
-    if(!emailFilled){
-      // Try first visible input
-      await p.evaluate((u)=>{
-        const inputs=document.querySelectorAll('input:not([type="hidden"])');
-        if(inputs[0]){inputs[0].value=u;inputs[0].dispatchEvent(new Event('input',{bubbles:true}))}
-      },c.username||'');
-      console.log('  → Username filled via JS');
+    },c.username||'');
+    
+    await new Promise(r=>setTimeout(r,500));
+    
+    // Also type it for safety
+    const emailInput=await p.$('input[type="email"],input[type="text"],input[name="email"],input[placeholder*="mail"],input[placeholder*="user"]');
+    if(emailInput){
+      await emailInput.click({clickCount:3}); // select all
+      await emailInput.type(c.username||'',{delay:50});
     }
     
     await new Promise(r=>setTimeout(r,1000));
     
-    // Password
-    const passEl=await p.$('input[type="password"]');
-    if(passEl){
-      await passEl.click();
-      await passEl.type(c.password||'',{delay:80});
-      console.log('  → Password filled');
-    }else{
-      await p.evaluate((pw)=>{
-        const inputs=document.querySelectorAll('input[type="password"]');
-        if(inputs[0]){inputs[0].value=pw;inputs[0].dispatchEvent(new Event('input',{bubbles:true}))}
-      },c.password||'');
+    // Fill password - Angular way
+    await p.evaluate((password)=>{
+      const inp=document.querySelector('input[type="password"]');
+      if(inp){
+        inp.focus();
+        inp.value=password;
+        inp.dispatchEvent(new Event('input',{bubbles:true}));
+        inp.dispatchEvent(new Event('change',{bubbles:true}));
+        inp.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));
+      }
+    },c.password||'');
+    
+    await new Promise(r=>setTimeout(r,500));
+    
+    // Also type it
+    const passInput=await p.$('input[type="password"]');
+    if(passInput){
+      await passInput.click({clickCount:3});
+      await passInput.type(c.password||'',{delay:50});
     }
     
     await new Promise(r=>setTimeout(r,2000));
     
-    // Submit
-    try{
-      await Promise.all([
-        p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}).catch(()=>{}),
-        p.click('button[type="submit"],input[type="submit"],button.btn-primary,.login-btn').catch(()=>p.keyboard.press('Enter'))
-      ]);
-    }catch(e){await p.keyboard.press('Enter')}
+    // Submit - try button click then Enter
+    const submitted=await p.evaluate(()=>{
+      const btn=document.querySelector('button[type="submit"],button.btn-primary,button.login-btn,input[type="submit"]');
+      if(btn){btn.click();return 'button:'+btn.innerText}
+      return null;
+    });
+    console.log('  → Submit:',submitted||'no button found, pressing Enter');
+    if(!submitted)await p.keyboard.press('Enter');
     
-    await new Promise(r=>setTimeout(r,8000)); // Angular route change wait
-    const url=p.url();
-    console.log('  → Post-login URL:',url);
+    // Wait for navigation
+    await new Promise(r=>setTimeout(r,10000));
     
-    if(url.includes('login')){
+    const finalUrl=p.url();
+    console.log('  → Final URL:',finalUrl);
+    
+    // Check login result
+    if(finalUrl.includes('/partner/login')||finalUrl.includes('/login')){
       const txt=await p.evaluate(()=>document.body.innerText.substring(0,300));
-      throw new Error('Login failed. Page: '+txt.substring(0,200));
+      // Maybe credentials wrong or Angular didn't submit
+      throw new Error('Login failed. URL: '+finalUrl+' Page: '+txt.substring(0,150));
     }
     
-    console.log('  → Login OK! Navigating to reports...');
+    console.log('  → Login OK!');
     
-    // Go to Media Report
+    // Navigate to Media Report
     await p.goto(baseUrl+'/partner/reports/media',{waitUntil:'networkidle2',timeout:30000});
-    await new Promise(r=>setTimeout(r,6000)); // Angular render
+    await new Promise(r=>setTimeout(r,8000));
     
     // Extract table
     const data=await p.evaluate(()=>{
