@@ -2,15 +2,11 @@
 // STARZPARTNERS (BitStarz/SoftSwiss) — Partner API (Statistic Token)
 // NO browser, NO reCAPTCHA, NO 2FA — pure REST API.
 //
-// Place at: scrapers/starzpartners.js  (replaces old Puppeteer one)
+// Place at: scrapers/starzpartners.js
 //
-// Auth (per docs): Authorization header = STATISTIC_TOKEN
+// Auth: Authorization header = STATISTIC_TOKEN
 // Endpoint: GET /api/customer/v1/partner/traffic_report
 //   query: from (inclusive), to (EXCLUSIVE), date_group_by, page
-//
-// Response shape:
-//   { rows: { data: [ [ {name,value,type}, ... ], ... ] },
-//     overall_totals: {...}, current_page, total_pages, ... }
 //
 // Credentials from Code.gs fetchViaPuppeteer:
 //   c.token   -> STATISTIC_TOKEN   (Col C)
@@ -20,13 +16,11 @@
 
 async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://starzpartners.com').replace(/\/+$/, '');
-  const token = c.token || c.username; // Col C carries the token
+  const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
-  const groupBy = (c.report || 'day').toLowerCase(); // hour/day/week/month/year
-
-  // 'to' is EXCLUSIVE per docs -> add 1 day to the requested end date
-  const toExclusive = addDays(dt, 1);
+  const groupBy = (c.report || 'day').toLowerCase();
+  const toExclusive = addDays(dt, 1); // 'to' is exclusive per docs
 
   const path = '/api/customer/v1/partner/traffic_report';
   const headers = {
@@ -49,16 +43,24 @@ async function scrape(c, df, dt, cp) {
       + '&page=' + page;
 
     console.log('  -> StarzPartners page', page, df, '->', toExclusive);
-    const resp = await fetch(url, { method: 'GET', headers });
-    const body = await resp.text();
-    if (!resp.ok) throw new Error('StarzPartners API failed (' + resp.status + '): ' + body.substring(0, 250));
+
+    // fetch with retry on 429 (rate limit)
+    const { ok, status, body } = await fetchWithRetry(url, headers, 4);
+    if (!ok) {
+      // If we already have some data, return what we have instead of failing
+      if (allRows.length > 0) {
+        console.log('  -> StarzPartners stopped at page', page, 'due to', status, '— returning partial', allRows.length, 'rows');
+        break;
+      }
+      throw new Error('StarzPartners API failed (' + status + '): ' + body.substring(0, 200)
+        + (status === 429 ? ' — rate limited. Try a smaller date range (e.g. Last Month) or use report:month.' : ''));
+    }
 
     let data;
     try { data = JSON.parse(body); }
     catch (e) { throw new Error('StarzPartners: response not JSON: ' + body.substring(0, 250)); }
 
     const dataRows = (data.rows && data.rows.data) ? data.rows.data : [];
-    // Each row is an array of {name, value, type}
     dataRows.forEach(cells => {
       if (!headerNames) headerNames = cells.map(c => c.name);
       const rowObj = {};
@@ -68,31 +70,79 @@ async function scrape(c, df, dt, cp) {
 
     totalPages = data.total_pages || 1;
     page++;
-    // safety cap
-    if (page > 50) break;
+
+    // polite delay between pages to avoid 429
+    if (page <= totalPages) await sleep(600);
+    if (page > 100) break; // hard safety cap
   } while (page <= totalPages);
 
   if (!allRows.length || !headerNames) throw new Error('StarzPartners: no rows for ' + df + ' to ' + dt);
 
-  // Build headers + rows (union of keys, in first-seen order)
   const keys = headerNames.slice();
   allRows.forEach(o => Object.keys(o).forEach(k => { if (keys.indexOf(k) < 0) keys.push(k); }));
 
+  // Find the date column and force YYYY-MM-DD so the sheet doesn't mangle it
+  const dateKeyIdx = keys.findIndex(k => /date|day/i.test(k));
+
   const headerLabels = keys.map(prettyLabel);
-  const rows = allRows.map(o => keys.map(k => {
-    const v = o[k];
-    return (v === null || v === undefined) ? '' : String(v);
+  const rows = allRows.map(o => keys.map((k, idx) => {
+    let v = o[k];
+    if (v === null || v === undefined) return '';
+    v = String(v);
+    if (idx === dateKeyIdx) v = normalizeDate(v); // unify date format
+    return v;
   }));
 
   console.log('  -> StarzPartners', rows.length, 'rows across', totalPages, 'page(s)');
   return { headers: headerLabels, rows };
 }
 
+async function fetchWithRetry(url, headers, maxTries) {
+  let lastStatus = 0, lastBody = '';
+  for (let i = 0; i < maxTries; i++) {
+    const resp = await fetch(url, { method: 'GET', headers });
+    const body = await resp.text();
+    if (resp.ok) return { ok: true, status: resp.status, body };
+    lastStatus = resp.status; lastBody = body;
+    if (resp.status === 429) {
+      // exponential backoff: 2s, 4s, 8s
+      const wait = 2000 * Math.pow(2, i);
+      console.log('  -> 429 rate limited, waiting', wait, 'ms (try', i + 1, ')');
+      await sleep(wait);
+      continue;
+    }
+    // other errors: don't retry
+    return { ok: false, status: resp.status, body };
+  }
+  return { ok: false, status: lastStatus, body: lastBody };
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 function addDays(ymdStr, n) {
   const d = new Date(ymdStr + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
 }
+
+// Force any date string to YYYY-MM-DD (prevents sheet auto-format mixups)
+function normalizeDate(s) {
+  s = String(s).trim();
+  let m;
+  // already YYYY-MM-DD
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+  // DD/MM/YYYY or DD-MM-YYYY
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (m) {
+    let d = +m[1], mo = +m[2], y = +m[3];
+    if (d > 12) return y + '-' + pad(mo) + '-' + pad(d);        // clearly DD/MM
+    if (mo > 12) return y + '-' + pad(d) + '-' + pad(mo);       // clearly MM/DD
+    return y + '-' + pad(mo) + '-' + pad(d);                    // assume DD/MM (iGaming default)
+  }
+  return s; // leave as-is if unknown
+}
+function pad(n) { return String(n).padStart(2, '0'); }
 
 function prettyLabel(k) {
   return String(k).replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
