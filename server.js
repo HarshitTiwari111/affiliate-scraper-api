@@ -4,11 +4,11 @@ const PORT = process.env.PORT || 10000;
 const CHROME = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 app.use(express.json());
 
-// Elite Casino now uses OAuth2 (no browser). Betmen still uses Puppeteer.
-const ecOauth = require('./scrapers/elitecasino-oauth');
-const bm = require('./scrapers/cellxpert'); // betmen scraper lives in cellxpert.js
+const ecOauth = require('./scrapers/elitecasino-oauth'); // Elite Casino OAuth (no browser)
+const bm = require('./scrapers/cellxpert');              // Betmen (Puppeteer) lives in cellxpert.js
+const vp = require('./scrapers/vpartners');              // V.Partners remote-stats (no browser)
 
-app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen'] }));
+app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen', 'vpartners'] }));
 app.get('/health', (q, r) => r.json({ status: 'ok', chrome: CHROME }));
 
 app.get('/myip', async (q, r) => {
@@ -29,6 +29,7 @@ app.post('/scrape', async (q, r) => {
     switch (platform) {
       case 'elitecasino': result = await ecOauth.scrape(credentials, dateFrom, dateTo, CHROME); break;
       case 'betmen':      result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'vpartners':   result = await vp.scrape(credentials, dateFrom, dateTo, CHROME); break;
       default: return r.status(400).json({ error: 'Unknown or unsupported platform: ' + platform });
     }
     r.json({ success: true, headers: result.headers, rows: result.rows });
