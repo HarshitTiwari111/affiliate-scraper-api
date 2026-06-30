@@ -5,10 +5,11 @@ const CHROME = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 app.use(express.json());
 
 const ecOauth = require('./scrapers/elitecasino-oauth'); // Elite Casino OAuth (no browser)
-const bm = require('./scrapers/cellxpert');              // Betmen (Puppeteer) lives in cellxpert.js
+const bm = require('./scrapers/betmen');                 // Betmen Cellxpert API-key (no browser)
 const vp = require('./scrapers/vpartners');              // V.Partners remote-stats (no browser)
+const sp = require('./scrapers/starzpartners');          // StarzPartners Partner API (no browser)
 
-app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen', 'vpartners'] }));
+app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen', 'vpartners', 'starzpartners'] }));
 app.get('/health', (q, r) => r.json({ status: 'ok', chrome: CHROME }));
 
 app.get('/myip', async (q, r) => {
@@ -27,9 +28,10 @@ app.post('/scrape', async (q, r) => {
   try {
     let result;
     switch (platform) {
-      case 'elitecasino': result = await ecOauth.scrape(credentials, dateFrom, dateTo, CHROME); break;
-      case 'betmen':      result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
-      case 'vpartners':   result = await vp.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'elitecasino':   result = await ecOauth.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'betmen':        result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'vpartners':     result = await vp.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'starzpartners': result = await sp.scrape(credentials, dateFrom, dateTo, CHROME); break;
       default: return r.status(400).json({ error: 'Unknown or unsupported platform: ' + platform });
     }
     r.json({ success: true, headers: result.headers, rows: result.rows });
