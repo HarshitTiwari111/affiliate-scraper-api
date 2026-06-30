@@ -3,14 +3,7 @@ const S=require('puppeteer-extra-plugin-stealth');
 puppeteer.use(S());
 
 async function scrape(c,df,dt,cp){
-  // If chromePath provided, use Puppeteer to scrape dashboard
-  if(cp){return scrapeDashboard(c,df,dt,cp)}
-  
-  // Fallback: try API
-  throw new Error('Cellxpert API not working. Use Puppeteer mode.');
-}
-
-async function scrapeDashboard(c,df,dt,cp){
+  if(!cp)throw new Error('Chrome path required');
   const baseUrl='https://track.betmenaffiliates.com';
   let br;
   try{
@@ -18,54 +11,85 @@ async function scrapeDashboard(c,df,dt,cp){
       args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process']});
     const p=await br.newPage();
     await p.setViewport({width:1280,height:800});
+    await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
     
-    // Go to login
     console.log('  → Loading Betmen login...');
-    await p.goto(baseUrl+'/partner/',{waitUntil:'networkidle2',timeout:45000});
-   await new Promise(r=>setTimeout(r,6000));
+    await p.goto(baseUrl+'/partner/login',{waitUntil:'networkidle2',timeout:45000});
+    await new Promise(r=>setTimeout(r,5000)); // Angular render wait
     
-    // Wait for Angular to render
-    await p.waitForSelector('input[type="email"],input[type="text"],input[name="email"],input[name="username"]',{timeout:15000});
+    // Log what's on page
+    const pageContent=await p.evaluate(()=>document.body.innerText.substring(0,300));
+    console.log('  → Page:',pageContent.substring(0,100));
     
-    // Find and fill email/username
-    for(const sel of['input[type="email"]','input[name="email"]','input[name="username"]','input[type="text"]']){
+    // Try multiple input selectors for Angular
+    const inputSelectors=[
+      'input[type="email"]','input[type="text"]','input[name="email"]',
+      'input[name="username"]','input[name="login"]','input[formcontrolname="email"]',
+      'input[formcontrolname="username"]','input[formcontrolname="login"]',
+      'input[placeholder*="mail"]','input[placeholder*="user"]','input[placeholder*="login"]'
+    ];
+    
+    let emailFilled=false;
+    for(const sel of inputSelectors){
       const el=await p.$(sel);
-      if(el){await el.type(c.username||c.apiKey||'',{delay:50});break;}
+      if(el){
+        await el.click();
+        await el.type(c.username||c.apiKey||'',{delay:80});
+        console.log('  → Username filled with:',sel);
+        emailFilled=true;
+        break;
+      }
+    }
+    if(!emailFilled){
+      // Try first visible input
+      await p.evaluate((u)=>{
+        const inputs=document.querySelectorAll('input:not([type="hidden"])');
+        if(inputs[0]){inputs[0].value=u;inputs[0].dispatchEvent(new Event('input',{bubbles:true}))}
+      },c.username||'');
+      console.log('  → Username filled via JS');
     }
     
-    // Fill password if provided
-    if(c.password){
-      const pp=await p.$('input[type="password"]');
-      if(pp)await pp.type(c.password,{delay:50});
+    await new Promise(r=>setTimeout(r,1000));
+    
+    // Password
+    const passEl=await p.$('input[type="password"]');
+    if(passEl){
+      await passEl.click();
+      await passEl.type(c.password||'',{delay:80});
+      console.log('  → Password filled');
+    }else{
+      await p.evaluate((pw)=>{
+        const inputs=document.querySelectorAll('input[type="password"]');
+        if(inputs[0]){inputs[0].value=pw;inputs[0].dispatchEvent(new Event('input',{bubbles:true}))}
+      },c.password||'');
     }
+    
+    await new Promise(r=>setTimeout(r,2000));
     
     // Submit
-    await new Promise(r=>setTimeout(r,1000));
     try{
       await Promise.all([
         p.waitForNavigation({waitUntil:'networkidle2',timeout:30000}).catch(()=>{}),
-        p.click('button[type="submit"],input[type="submit"],.login-btn,button.btn-primary').catch(()=>p.keyboard.press('Enter'))
+        p.click('button[type="submit"],input[type="submit"],button.btn-primary,.login-btn').catch(()=>p.keyboard.press('Enter'))
       ]);
-    }catch(e){}
+    }catch(e){await p.keyboard.press('Enter')}
     
-    await new Promise(r=>setTimeout(r,5000));
-    console.log('  → Current URL:',p.url());
+    await new Promise(r=>setTimeout(r,8000)); // Angular route change wait
+    const url=p.url();
+    console.log('  → Post-login URL:',url);
     
-    // Navigate to reports/statistics
-const reportPaths=['/partner/reports/media','/partner/reports/earnings','/partner/reports/registrations','/partner/reports'];
-    for(const rp of reportPaths){
-      try{
-        await p.goto(baseUrl+rp,{waitUntil:'networkidle2',timeout:20000});
-       await new Promise(r=>setTimeout(r,6000));
-        const hasData=await p.evaluate(()=>{
-          return document.querySelectorAll('table').length>0||
-                 document.querySelectorAll('[class*="table"],[class*="grid"],[class*="report"]').length>0;
-        });
-        if(hasData){console.log('  → Found data at:',rp);break;}
-      }catch(e){}
+    if(url.includes('login')){
+      const txt=await p.evaluate(()=>document.body.innerText.substring(0,300));
+      throw new Error('Login failed. Page: '+txt.substring(0,200));
     }
     
-    // Extract table data
+    console.log('  → Login OK! Navigating to reports...');
+    
+    // Go to Media Report
+    await p.goto(baseUrl+'/partner/reports/media',{waitUntil:'networkidle2',timeout:30000});
+    await new Promise(r=>setTimeout(r,6000)); // Angular render
+    
+    // Extract table
     const data=await p.evaluate(()=>{
       const tables=document.querySelectorAll('table');
       if(tables.length>0){
@@ -75,16 +99,18 @@ const reportPaths=['/partner/reports/media','/partner/reports/earnings','/partne
         (best.querySelector('thead tr')||best.querySelector('tr'))?.querySelectorAll('th,td').forEach(c=>h.push(c.innerText.trim()));
         best.querySelectorAll('tbody tr').forEach(rr=>{
           const cs=[];rr.querySelectorAll('td').forEach(c=>cs.push(c.innerText.trim()));
-          if(cs.length)r.push(cs);
+          if(cs.length&&cs[0]!=='Total')r.push(cs);
         });
         if(h.length&&r.length)return{headers:h,rows:r};
       }
-      // Try div-based data
-      const text=document.body.innerText;
-      return{headers:['Page Content'],rows:[[text.substring(0,1000)]]};
+      return null;
     });
     
-    if(!data||!data.rows.length)throw new Error('No data found on Betmen dashboard');
+    if(!data){
+      const txt=await p.evaluate(()=>document.body.innerText.substring(0,500));
+      throw new Error('No table found. Page: '+txt.substring(0,300));
+    }
+    
     console.log('  ✅ Got',data.rows.length,'rows');
     return data;
   }finally{if(br)await br.close()}
