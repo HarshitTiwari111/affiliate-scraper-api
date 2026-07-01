@@ -83,6 +83,52 @@ app.get('/elite-raw', async (q, r) => {
   } catch (e) { r.json({ error: e.message }); }
 });
 
+// ============================================================
+// TEMPORARY DEBUG — StarzPartners me promo filter param try karne ke liye
+// Browser me khol: /starz-raw?token=YOUR_STARZ_TOKEN
+// ============================================================
+app.get('/starz-raw', async (q, r) => {
+  try {
+    const token = q.query.token || '';
+    const base = 'https://starzpartners.com';
+    const path = '/api/customer/v1/partner/traffic_report';
+    const from = '2026-06-25';
+    const to = '2026-07-02';
+    const headers = { 'Accept': 'application/json', 'Authorization': String(token), 'User-Agent': 'Mozilla/5.0' };
+
+    // Alag-alag promo filter params try karo
+    const tries = {
+      'no_filter': '?from=' + from + '&to=' + to + '&date_group_by=day',
+      'promo_id': '?from=' + from + '&to=' + to + '&date_group_by=day&promo_id=30482',
+      'campaign_id': '?from=' + from + '&to=' + to + '&date_group_by=day&campaign_id=19941',
+      'filter_promo': '?from=' + from + '&to=' + to + '&date_group_by=day&filter[promo_id]=30482',
+      'filter_campaign': '?from=' + from + '&to=' + to + '&date_group_by=day&filter[campaign_id]=19941',
+      'group_by_promo': '?from=' + from + '&to=' + to + '&date_group_by=day&group_by=promo',
+      'promo_hash': '?from=' + from + '&to=' + to + '&date_group_by=day&promo=b975e1edd'
+    };
+
+    const out = {};
+    for (const name of Object.keys(tries)) {
+      try {
+        const resp = await fetch(base + path + tries[name], { headers });
+        const body = await resp.text();
+        let totalVisits = '?';
+        let rowCount = '?';
+        try {
+          const d = JSON.parse(body);
+          const rows = (d.rows && d.rows.data) ? d.rows.data : [];
+          rowCount = rows.length;
+          let v = 0;
+          rows.forEach(cells => { cells.forEach(c => { if (/visit/i.test(c.name)) v += parseFloat(c.value) || 0; }); });
+          totalVisits = v;
+        } catch (e) {}
+        out[name] = { status: resp.status, rowCount: rowCount, totalVisits: totalVisits, preview: body.substring(0, 200) };
+      } catch (e) { out[name] = { error: e.message }; }
+    }
+    r.json(out);
+  } catch (e) { r.json({ error: e.message }); }
+});
+
 app.post('/scrape', async (q, r) => {
   const { platform, dateFrom, dateTo, credentials } = q.body;
   if (!platform || !dateFrom || !dateTo || !credentials) {
