@@ -30,7 +30,7 @@ async function scrape(c, df, dt, cp) {
   };
 
   const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'ngr']);
-  const groupBy = JSON.stringify(['date']);
+const groupBy = JSON.stringify(['brand', 'campaign']);
 
   let allRows = [];
   let headerNames = null;
@@ -49,10 +49,9 @@ async function scrape(c, df, dt, cp) {
       + '&exchange_rates_date=' + encodeURIComponent(dt)
       + '&page=' + page;
 
-    // Campaign filter (poore campaign ka data — UI jaisa)
-    if (campaignIds) url += '&campaign_ids=' + encodeURIComponent(campaignIds);
-    // Promo filter (sirf ek promo ka data)
+  // Promo filter (UI jaisa — sirf promo_ids)
     if (promoIds) url += '&promo_ids=' + encodeURIComponent(promoIds);
+    if (campaignIds) url += '&campaign_ids=' + encodeURIComponent(campaignIds);
 
     console.log('  -> StarzPartners /report page', page, df, '->', dt,
       (campaignIds ? '(campaign ' + campaignIds + ')' : '') + (promoIds ? '(promo ' + promoIds + ')' : ''));
