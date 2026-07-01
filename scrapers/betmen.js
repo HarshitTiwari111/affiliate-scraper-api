@@ -1,93 +1,124 @@
 // ============================================================
-// BETMEN AFFILIATES — Cellxpert official API (API key)
-// NO browser, NO login, NO reCAPTCHA — pure REST API.
-//
-// Place at: scrapers/betmen.js   (REPLACE the old Puppeteer/Angular code)
-//
-// Cellxpert API docs:
-//   GET /api/?command=mediareport&fromdate=YYYY-MM-DD&todate=YYYY-MM-DD&Day=1&Brand=1&json=1
-//   headers: affiliateid: <ID>,  x-api-key: <ACCESS_KEY>
-//   commands: mediareport (JSON), commissions (XML), registrations
-//   limits: max 31-day range, no future dates
+// BETMEN AFFILIATES — Cellxpert API (API key)
+// Auto-tries multiple auth header styles + trims key.
 //
 // Credentials from Code.gs fetchViaPuppeteer:
-//   c.affiliateId -> Col C  (e.g. 36451)
+//   c.affiliateId -> Col C  (36451)
 //   c.apiKey      -> Col J  (Access Key)
-//   c.baseUrl     -> Col H baseUrl:... (default https://track.betmenaffiliates.com)
-//   c.report      -> Col H report:mediareport | commissions | registrations (default mediareport)
+//   c.baseUrl     -> default https://track.betmenaffiliates.com
+//   c.report      -> mediareport (default)
 // ============================================================
 
 async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://track.betmenaffiliates.com').replace(/\/+$/, '');
-  const affiliateId = c.affiliateId || c.username; // Col C
-  const apiKey = c.apiKey || c.password;           // Col J
+  const affiliateId = String(c.affiliateId || c.username || '').trim();
+  const apiKey = String(c.apiKey || c.password || '').trim(); // TRIM — hidden space hata do
   const command = (c.report || 'mediareport').toLowerCase();
 
   if (!affiliateId) throw new Error('Betmen: affiliateId missing (Col C).');
-  if (!apiKey) throw new Error('Betmen: API key missing (Col J). Regenerate key in Betmen API settings.');
+  if (!apiKey) throw new Error('Betmen: API key missing (Col J).');
 
-  // Cellxpert: max 31-day window. Split the range into <=31-day chunks.
+  console.log('  -> Betmen affId=' + affiliateId + ' keyLen=' + apiKey.length);
+
+  // Different header styles Cellxpert installs use — try each until one works
+  const authStyles = [
+    { 'affiliateid': affiliateId, 'x-api-key': apiKey },
+    { 'affiliateid': affiliateId, 'apikey': apiKey },
+    { 'affiliateid': affiliateId, 'accesskey': apiKey },
+    { 'affiliateid': affiliateId, 'Authorization': apiKey },
+    { 'affiliateid': affiliateId, 'Authorization': 'Bearer ' + apiKey },
+    { 'affiliateid': affiliateId, 'api-key': apiKey },
+    // key as query param instead of header
+    { 'affiliateid': affiliateId, '__queryKey': apiKey }
+  ];
+
   const chunks = splitRange(df, dt, 31);
-
-  const headers = {
-    'affiliateid': String(affiliateId),
-    'x-api-key': String(apiKey),
-    'Accept': 'application/json',
-    'User-Agent': 'Mozilla/5.0'
-  };
-
   let allRows = [];
   let headerNames = null;
   let isXml = false;
+  let workingStyle = null;
+  let lastErr = '';
 
   for (const [cf, ct] of chunks) {
-    const url = base + '/api/'
-      + '?command=' + encodeURIComponent(command)
-      + '&fromdate=' + encodeURIComponent(cf)
-      + '&todate=' + encodeURIComponent(ct)
-      + '&Day=1&Brand=1&json=1';
+    let chunkDone = false;
 
-    console.log('  -> Betmen', command, cf, '->', ct);
-    const resp = await fetch(url, { method: 'GET', headers });
-    const body = await resp.text();
-    if (!resp.ok) {
-      throw new Error('Betmen API failed (' + resp.status + '): ' + body.substring(0, 250)
-        + (resp.status === 401 || resp.status === 403
-            ? ' — check API key + that Render IP is whitelisted (call /myip).'
-            : ''));
+    // Agar ek style pehle chunk me chal gayi, aage usi ko use karo
+    const stylesToTry = workingStyle ? [workingStyle] : authStyles;
+
+    for (const style of stylesToTry) {
+      const headers = { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' };
+      let url = base + '/api/'
+        + '?command=' + encodeURIComponent(command)
+        + '&fromdate=' + encodeURIComponent(cf)
+        + '&todate=' + encodeURIComponent(ct)
+        + '&Day=1&Brand=1&json=1';
+
+      // Copy style into headers (except the special __queryKey)
+      for (const k in style) {
+        if (k === '__queryKey') url += '&apikey=' + encodeURIComponent(style[k]) + '&key=' + encodeURIComponent(style[k]);
+        else headers[k] = style[k];
+      }
+
+      let resp, body;
+      try {
+        resp = await fetch(url, { method: 'GET', headers });
+        body = await resp.text();
+      } catch (e) { lastErr = 'network: ' + e.message; continue; }
+
+      const trimmed = body.trim();
+      const low = trimmed.toLowerCase();
+
+      // Auth failure — is style ko chhod ke agli try karo
+      if (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
+          || low.indexOf('not authenticated') >= 0 || low.indexOf('access denied') >= 0
+          || (low.indexOf('invalid') >= 0 && low.indexOf('key') >= 0)) {
+        lastErr = trimmed.substring(0, 120);
+        const usedHeader = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
+        console.log('  -> auth fail with [' + usedHeader + ']: ' + lastErr);
+        continue;
+      }
+      if (low.indexOf('ip not authenticated') >= 0) {
+        const ipm = trimmed.match(/(\d+\.\d+\.\d+\.\d+)/);
+        throw new Error('Betmen IP block: ' + (ipm ? ipm[1] : '?') + ' — /myip se IP le ke Betmen panel me whitelist karo.');
+      }
+      if (!resp.ok) { lastErr = 'HTTP ' + resp.status + ': ' + trimmed.substring(0, 120); continue; }
+
+      // ── Success — parse ──
+      let parsedRows = [];
+      if (trimmed.startsWith('<')) {
+        isXml = true;
+        parsedRows = parseXmlRows(trimmed);
+      } else {
+        let data;
+        try { data = JSON.parse(body); }
+        catch (e) { lastErr = 'not JSON/XML: ' + trimmed.substring(0, 120); continue; }
+        parsedRows = extractJsonRows(data);
+      }
+
+      // Parse hua (khaali bhi ho sakta hai — wo valid hai)
+      const usedHeader = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
+      console.log('  -> Betmen OK via [' + usedHeader + '], ' + parsedRows.length + ' rows for ' + cf);
+      workingStyle = style; // aage isi ko use karo
+      parsedRows.forEach(o => { if (!headerNames) headerNames = Object.keys(o); allRows.push(o); });
+      chunkDone = true;
+      break;
     }
 
-    // commissions command returns XML; mediareport returns JSON
-    const trimmed = body.trim();
-    if (trimmed.startsWith('<')) {
-      isXml = true;
-      const parsed = parseXmlRows(trimmed);
-      if (parsed.length) {
-        if (!headerNames) headerNames = Object.keys(parsed[0]);
-        allRows = allRows.concat(parsed);
-      }
-    } else {
-      let data;
-      try { data = JSON.parse(body); }
-      catch (e) { throw new Error('Betmen: response not JSON/XML: ' + body.substring(0, 250)); }
-
-      const rowsArr = extractJsonRows(data);
-      rowsArr.forEach(o => {
-        if (!headerNames) headerNames = Object.keys(o);
-        allRows.push(o);
-      });
+    if (!chunkDone && !workingStyle) {
+      // Koi bhi auth style kaam nahi kari
+      throw new Error('Betmen: koi auth style kaam nahi kari. '
+        + 'ID (' + affiliateId + ') aur key (Col J) same Betmen account ke hone chahiye. '
+        + 'Last server response: "' + lastErr + '"');
     }
   }
 
   if (!allRows.length || !headerNames) {
-    throw new Error('Betmen: no rows for ' + df + ' to ' + dt + ' (command: ' + command + ').');
+    // Auth chal gaya par data khaali — ye error nahi, bas is range me data nahi
+    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me koi data nahi (command: ' + command + '). Dusra date range try kar.');
   }
 
-  // union of keys (in first-seen order)
   const keys = headerNames.slice();
   allRows.forEach(o => Object.keys(o).forEach(k => { if (keys.indexOf(k) < 0) keys.push(k); }));
-
-  // force date column to YYYY-MM-DD with leading apostrophe (sheet keeps it as text)
   const dateIdx = keys.findIndex(k => /date|day/i.test(k));
 
   const headerLabels = keys.map(prettyLabel);
@@ -95,10 +126,7 @@ async function scrape(c, df, dt, cp) {
     let v = o[k];
     if (v === null || v === undefined) return '';
     v = String(v);
-    if (idx === dateIdx) {
-      const norm = normalizeDate(v);
-      if (norm) v = "'" + norm; // apostrophe => sheet treats as text, no auto-format
-    }
+    if (idx === dateIdx) { const norm = normalizeDate(v); if (norm) v = "'" + norm; }
     return v;
   }));
 
@@ -107,23 +135,17 @@ async function scrape(c, df, dt, cp) {
 }
 
 // ---- helpers ----
-
 function extractJsonRows(data) {
-  // Cellxpert responses vary; dig out the array of row objects.
   if (Array.isArray(data)) return data;
   const candidates = ['data', 'rows', 'records', 'report', 'results', 'items', 'mediareport', 'commissions'];
   for (const key of candidates) {
     if (data[key]) {
       if (Array.isArray(data[key])) return data[key];
       if (typeof data[key] === 'object') {
-        // sometimes nested one level
-        for (const k2 of candidates) {
-          if (Array.isArray(data[key][k2])) return data[key][k2];
-        }
+        for (const k2 of candidates) { if (Array.isArray(data[key][k2])) return data[key][k2]; }
       }
     }
   }
-  // object of objects -> values
   if (typeof data === 'object') {
     const vals = Object.values(data).filter(v => v && typeof v === 'object');
     if (vals.length && vals.every(v => !Array.isArray(v))) return vals;
@@ -132,33 +154,21 @@ function extractJsonRows(data) {
 }
 
 function parseXmlRows(xml) {
-  // Generic XML -> array of flat objects.
-  // Find repeating child blocks (e.g. <row>...</row>, <commission>...</commission>)
   const rows = [];
-  // grab inner of the first repeating tag
   const tagMatch = xml.match(/<(\w+)>\s*<(\w+)>/);
   let rowTag = null;
   if (tagMatch) rowTag = tagMatch[2];
   if (!rowTag) {
-    // fallback: any tag that appears multiple times wrapping fields
     const m = xml.match(/<(\w+)>[^<]*<\w+>/g);
-    if (m && m.length) {
-      const t = m[0].match(/<(\w+)>/);
-      if (t) rowTag = t[1];
-    }
+    if (m && m.length) { const t = m[0].match(/<(\w+)>/); if (t) rowTag = t[1]; }
   }
   if (!rowTag) return rows;
-
   const re = new RegExp('<' + rowTag + '>([\\s\\S]*?)<\\/' + rowTag + '>', 'g');
   let r;
   while ((r = re.exec(xml)) !== null) {
-    const inner = r[1];
-    const obj = {};
-    const fre = /<(\w+)>([\s\S]*?)<\/\1>/g;
-    let f;
-    while ((f = fre.exec(inner)) !== null) {
-      obj[f[1]] = f[2].replace(/<!\[CDATA\[|\]\]>/g, '').trim();
-    }
+    const inner = r[1]; const obj = {};
+    const fre = /<(\w+)>([\s\S]*?)<\/\1>/g; let f;
+    while ((f = fre.exec(inner)) !== null) { obj[f[1]] = f[2].replace(/<!\[CDATA\[|\]\]>/g, '').trim(); }
     if (Object.keys(obj).length) rows.push(obj);
   }
   return rows;
@@ -173,35 +183,20 @@ function splitRange(df, dt, maxDays) {
     chunkEnd.setUTCDate(chunkEnd.getUTCDate() + maxDays - 1);
     if (chunkEnd > end) chunkEnd = new Date(end);
     out.push([ymd(start), ymd(chunkEnd)]);
-    start = new Date(chunkEnd);
-    start.setUTCDate(start.getUTCDate() + 1);
+    start = new Date(chunkEnd); start.setUTCDate(start.getUTCDate() + 1);
   }
   return out.length ? out : [[df, dt]];
 }
 
-function ymd(d) {
-  return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate());
-}
-
+function ymd(d) { return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
 function normalizeDate(s) {
-  s = String(s).trim();
-  let m;
-  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+  s = String(s).trim(); let m;
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
   m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if (m) {
-    let d = +m[1], mo = +m[2], y = +m[3];
-    if (d > 12) return y + '-' + pad(mo) + '-' + pad(d);
-    if (mo > 12) return y + '-' + pad(d) + '-' + pad(mo);
-    return y + '-' + pad(mo) + '-' + pad(d);
-  }
+  if (m) { let d = +m[1], mo = +m[2], y = +m[3]; if (d > 12) return y + '-' + pad(mo) + '-' + pad(d); if (mo > 12) return y + '-' + pad(d) + '-' + pad(mo); return y + '-' + pad(mo) + '-' + pad(d); }
   return null;
 }
-
 function pad(n) { return String(n).padStart(2, '0'); }
-
-function prettyLabel(k) {
-  return String(k).replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
-}
+function prettyLabel(k) { return String(k).replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase()); }
 
 module.exports = { scrape };
