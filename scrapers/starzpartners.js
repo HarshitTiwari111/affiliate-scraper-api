@@ -29,8 +29,8 @@ async function scrape(c, df, dt, cp) {
     'User-Agent': 'Mozilla/5.0'
   };
 
-  const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'ngr']);
-const groupBy = JSON.stringify(['brand', 'campaign']);
+  const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'average_deposit_amount', 'ngr']);
+  const groupBy = JSON.stringify(['brand', 'campaign']);
 
   let allRows = [];
   let headerNames = null;
@@ -49,7 +49,7 @@ const groupBy = JSON.stringify(['brand', 'campaign']);
       + '&exchange_rates_date=' + encodeURIComponent(dt)
       + '&page=' + page;
 
-  // Promo filter (UI jaisa — sirf promo_ids)
+    // Promo filter (UI jaisa — sirf promo_ids)
     if (promoIds) url += '&promo_ids=' + encodeURIComponent(promoIds);
     if (campaignIds) url += '&campaign_ids=' + encodeURIComponent(campaignIds);
 
