@@ -86,7 +86,6 @@ app.get('/elite-raw', async (q, r) => {
 // ============================================================
 // TEMPORARY DEBUG — StarzPartners promo filter (with delays to avoid 429)
 // Browser me khol: /starz-raw?token=YOUR_STARZ_TOKEN
-// NOTE: ~25 sec lagega (gap de raha hai) — page load hone de, band mat karna.
 // ============================================================
 app.get('/starz-raw', async (q, r) => {
   try {
@@ -98,7 +97,6 @@ app.get('/starz-raw', async (q, r) => {
     const headers = { 'Accept': 'application/json', 'Authorization': String(token), 'User-Agent': 'Mozilla/5.0' };
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-    // Ek-ek karke test karo, beech me gap (429 se bachne ke liye)
     const tries = [
       ['no_filter', '?from=' + from + '&to=' + to + '&date_group_by=day'],
       ['promo_id', '?from=' + from + '&to=' + to + '&date_group_by=day&promo_id=30482'],
@@ -110,15 +108,11 @@ app.get('/starz-raw', async (q, r) => {
     const out = {};
     for (const [name, qs] of tries) {
       let done = false;
-      // Har try ko 429 pe 3 baar retry karo
       for (let attempt = 0; attempt < 3 && !done; attempt++) {
         try {
           const resp = await fetch(base + path + qs, { headers });
           const body = await resp.text();
-          if (resp.status === 429) {
-            await sleep(4000); // rate limited — 4 sec ruk ke retry
-            continue;
-          }
+          if (resp.status === 429) { await sleep(4000); continue; }
           let totalVisits = '?', rowCount = '?', colNames = [];
           try {
             const d = JSON.parse(body);
@@ -134,7 +128,60 @@ app.get('/starz-raw', async (q, r) => {
         } catch (e) { out[name] = { error: e.message }; done = true; }
       }
       if (!done) out[name] = { status: 429, note: 'still rate-limited after retries' };
-      await sleep(3000); // agla try se pehle 3 sec gap
+      await sleep(3000);
+    }
+    r.json(out);
+  } catch (e) { r.json({ error: e.message }); }
+});
+
+// ============================================================
+// TEMPORARY DEBUG — StarzPartners /report ka EXACT response (UI jaisa request)
+// Browser me khol: /starz-report?token=YOUR_STARZ_TOKEN
+// NOTE: ~15 sec lagega (gap de raha hai) — page load hone de.
+// ============================================================
+app.get('/starz-report', async (q, r) => {
+  try {
+    const token = q.query.token || '';
+    const base = 'https://starzpartners.com';
+    const headers = { 'Accept': 'application/json', 'Authorization': String(token), 'User-Agent': 'Mozilla/5.0' };
+    const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+    // EXACT jaisa UI bhejta hai (tere URL se copy kiya)
+    const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'average_deposit_amount', 'ngr']);
+
+    // 3 alag group_by try karo
+    const tries = [
+      ['group_date', JSON.stringify(['date'])],
+      ['group_brand_campaign', JSON.stringify(['brand', 'campaign'])],
+      ['group_promo', JSON.stringify(['promo'])]
+    ];
+
+    const out = {};
+    for (const [name, gb] of tries) {
+      const url = base + '/api/customer/v1/partner/report'
+        + '?columns=' + encodeURIComponent(columns)
+        + '&group_by=' + encodeURIComponent(gb)
+        + '&from=2026-06-25&to=2026-07-01'
+        + '&period=custom'
+        + '&conversion_currency=EUR&convert_all_currencies=1'
+        + '&exchange_rates_date=2026-07-01'
+        + '&promo_ids=30482'
+        + '&promo_codes=' + encodeURIComponent('[]')
+        + '&strategies=' + encodeURIComponent('[]')
+        + '&player_dynamic_tags_include=' + encodeURIComponent('[]')
+        + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
+
+      let done = false;
+      for (let a = 0; a < 3 && !done; a++) {
+        try {
+          const resp = await fetch(url, { headers });
+          const body = await resp.text();
+          if (resp.status === 429) { await sleep(4000); continue; }
+          out[name] = { status: resp.status, full: body.substring(0, 1200) };
+          done = true;
+        } catch (e) { out[name] = { error: e.message }; done = true; }
+      }
+      await sleep(3000);
     }
     r.json(out);
   } catch (e) { r.json({ error: e.message }); }
