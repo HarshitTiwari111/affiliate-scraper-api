@@ -1,8 +1,8 @@
 // ============================================================
 // ELITE CASINO PARTNERS - OAuth2 (MyAffiliates client_credentials)
 // NO browser, NO Puppeteer.
-// Multi-brand CSV: detects brand sections (Wild Casino / Super Slots)
-// and adds a "Brand" column so brand-dropdown filtering works.
+// CSV already has a "Channel" column (Wild Casino / Super Slots / etc)
+// in every row — so channel-dropdown filtering works directly.
 // ============================================================
 
 async function scrape(c, df, dt, cp) {
@@ -40,17 +40,19 @@ async function scrape(c, df, dt, cp) {
   if (csvText.__error) throw new Error('Stats download failed (' + csvText.status + '): ' + (csvText.body || '').substring(0, 300));
   if (/<html|<!doctype/i.test(csvText.substring(0, 200))) throw new Error('Elite Casino: got HTML instead of CSV - token rejected or scope insufficient.');
 
-  // Step 3: parse CSV WITH brand sections
-  const parsed = parseMultiBrandCsv(csvText);
+  // Step 3: parse CSV — Channel column is already inside every row.
+  // CSV has REPEATED header rows (one per channel block), so we skip any
+  // row whose first cell is "Date" (that's a header, not data).
+  const parsed = parseCsvSkipRepeatHeaders(csvText);
   if (!parsed.headers.length || !parsed.rows.length) throw new Error('Elite Casino: CSV empty for ' + df + ' to ' + dt);
-  console.log('  OK Got', parsed.rows.length, 'rows across', parsed.brandCount, 'brands');
+  console.log('  OK Got', parsed.rows.length, 'rows');
 
-  // Bada range (>45 din) => month-wise summary (per brand)
+  // Bada range (>45 din) => month-wise summary (channel-aware)
   if (spanDays(df, dt) > 45) {
-    const dateIdx = parsed.headers.findIndex(h => /date|day|month|period/i.test(String(h)));
-    const brandIdx = parsed.headers.findIndex(h => /^brand$/i.test(String(h)));
+    const dateIdx = parsed.headers.findIndex(h => /^date$|^day$|month|period/i.test(String(h)));
+    const chIdx = parsed.headers.findIndex(h => /^channel$/i.test(String(h)));
     if (dateIdx >= 0) {
-      const g = groupRowsByMonth(parsed.headers, parsed.rows, dateIdx, brandIdx);
+      const g = groupRowsByMonth(parsed.headers, parsed.rows, dateIdx, chIdx);
       parsed.rows = g.rows;
       console.log('  OK Grouped into', parsed.rows.length, 'month-rows');
     }
@@ -67,92 +69,51 @@ async function tryStats(url, token, method) {
 }
 
 // ============================================================
-// MULTI-BRAND CSV PARSER
-// CSV structure (Elite Casino):
-//   <Brand Name line OR "X pay period" line>
-//   Date,Impressions,Clicks,Signups,FTD,FTD Amount,...   <- header
-//   2026-06-30,0,8,1,0,0,...                              <- data
-//   (blank)
-//   <next Brand line>
-//   Date,...  <- header again
-//   ...data...
-// We detect each brand section and prepend a "Brand" column to every data row.
+// CSV parser — handles REPEATED header rows.
+// Structure:
+//   Date,Channel,Pay period,...,Income   <- header
+//   2026-06-30,Wild Casino,...           <- data
+//   Date,Channel,Pay period,...,Income   <- header AGAIN (per channel)
+//   2026-06-30,Super Slots,...           <- data
+// We take headers from the FIRST header row, then skip any later row
+// whose first cell == "Date" (repeat header) or first cell == "Total".
 // ============================================================
-function parseMultiBrandCsv(text) {
+function parseCsvSkipRepeatHeaders(text) {
   text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-
-  // Split into raw CSV records (quote-aware)
   const records = parseCsvRecords(text);
-  if (!records.length) return { headers: [], rows: [], brandCount: 0 };
+  if (!records.length) return { headers: [], rows: [] };
 
-  let headers = null;         // final headers (with "Brand" prepended)
-  let baseHeaders = null;     // detected data headers (Date, Clicks, ...)
-  let currentBrand = '';      // brand for current section
-  const outRows = [];
-  const brandSet = {};
-
-  // Helper: is this record a header row? (first cell looks like "Date"/"Day")
-  function isHeaderRecord(rec) {
-    const first = String(rec[0] || '').trim().toLowerCase();
-    return first === 'date' || first === 'day' || first === 'datum' || first === 'period';
-  }
-  // Helper: is this a brand/title line? (single non-empty cell, not a date, not a number)
-  function isBrandLine(rec) {
-    const nonEmpty = rec.filter(c => c && c.trim().length);
-    if (nonEmpty.length !== 1) return false;
-    const val = nonEmpty[0].trim();
-    if (/^\d/.test(val)) return false;                 // starts with number -> not a brand
-    if (isHeaderRecordVal(val)) return false;
-    return true;
-  }
-  function isHeaderRecordVal(v) {
-    const s = String(v).trim().toLowerCase();
-    return s === 'date' || s === 'day' || s === 'datum' || s === 'period';
-  }
-  // Helper: is this a "total" summary row?
-  function isTotalRow(rec) {
-    const first = String(rec[0] || '').trim().toLowerCase();
-    return first === 'total' || first === 'totals' || first === 'summary';
-  }
+  let headers = null;
+  const rows = [];
 
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
-    if (!rec.some(c => c && c.trim().length)) continue; // skip blank
+    if (!rec.some(c => c && c.trim().length)) continue; // blank
 
-    if (isHeaderRecord(rec)) {
-      baseHeaders = rec.map(h => h.trim());
-      if (!headers) headers = ['Brand'].concat(baseHeaders);
-      continue;
+    const first = String(rec[0] || '').trim().toLowerCase();
+
+    // Header row (first cell = Date/Day)
+    if (first === 'date' || first === 'day' || first === 'datum' || first === 'period') {
+      if (!headers) headers = rec.map(h => h.trim());
+      continue; // skip all header rows (first one already captured)
     }
 
-    if (isBrandLine(rec)) {
-      // Brand name — may be "Wild Casino" or "Wild Casino pay period : 01/07/2026"
-      let bname = rec.filter(c => c && c.trim().length)[0].trim();
-      // strip "pay period..." suffix if present
-      bname = bname.replace(/\s*pay period.*$/i, '').replace(/\s*:.*$/, '').trim();
-      currentBrand = bname;
-      continue;
-    }
+    // Total / summary row
+    if (first === 'total' || first === 'totals' || first === 'summary') continue;
 
-    if (isTotalRow(rec)) continue; // skip totals
-
-    // Data row — only if we have headers
-    if (baseHeaders) {
-      const cells = baseHeaders.map((h, idx) => (rec[idx] !== undefined ? String(rec[idx]).trim() : ''));
-      // skip if entire data row empty
+    // Data row
+    if (headers) {
+      const cells = headers.map((h, idx) => (rec[idx] !== undefined ? String(rec[idx]).trim() : ''));
       if (!cells.some(c => c.length)) continue;
-      // skip if first cell empty (section subtotal row with blank date)
-      if (!cells[0]) continue;
-      outRows.push([currentBrand].concat(cells));
-      if (currentBrand) brandSet[currentBrand] = true;
+      if (!cells[0]) continue; // empty date = subtotal
+      rows.push(cells);
     }
   }
 
-  if (!headers) return { headers: [], rows: [], brandCount: 0 };
-  return { headers: headers, rows: outRows, brandCount: Object.keys(brandSet).length };
+  return { headers: headers || [], rows: rows };
 }
 
-// Quote-aware CSV -> array of records (each record = array of cells)
+// Quote-aware CSV -> array of records
 function parseCsvRecords(text) {
   const records = []; let field = '', row = [], inQuotes = false;
   for (let i = 0; i < text.length; i++) {
@@ -171,26 +132,26 @@ function parseCsvRecords(text) {
   return records;
 }
 
-// ---- month grouping (brand-aware) ----
-function groupRowsByMonth(headers, rows, dateIdx, brandIdx) {
+// ---- month grouping (channel-aware) ----
+function groupRowsByMonth(headers, rows, dateIdx, chIdx) {
   const rateIdxs = new Set();
-  headers.forEach((h, i) => { if (i !== dateIdx && i !== brandIdx && /(^cr$|rate|ratio|percent|%|avg|average|conversion)/i.test(String(h))) rateIdxs.add(i); });
+  headers.forEach((h, i) => { if (i !== dateIdx && i !== chIdx && /(^cr$|rate|ratio|percent|%|avg|average|conversion)/i.test(String(h))) rateIdxs.add(i); });
   const buckets = {}; let order = 0;
   rows.forEach(row => {
     const dnum = ymdNum(String(row[dateIdx] || '').replace(/^'/, '').trim());
     if (!dnum) return;
-    const brand = brandIdx >= 0 ? String(row[brandIdx] || '') : '';
-    const mk = brand + '||' + dnum.substring(0, 4) + '-' + dnum.substring(4, 6);
-    if (!buckets[mk]) { buckets[mk] = { sums: {}, cnt: {}, order: order++, brand: brand, month: dnum.substring(0, 4) + '-' + dnum.substring(4, 6) }; headers.forEach((h, i) => { if (i !== dateIdx && i !== brandIdx) { buckets[mk].sums[i] = 0; buckets[mk].cnt[i] = 0; } }); }
+    const ch = chIdx >= 0 ? String(row[chIdx] || '') : '';
+    const mk = ch + '||' + dnum.substring(0, 4) + '-' + dnum.substring(4, 6);
+    if (!buckets[mk]) { buckets[mk] = { sums: {}, cnt: {}, order: order++, ch: ch, month: dnum.substring(0, 4) + '-' + dnum.substring(4, 6) }; headers.forEach((h, i) => { if (i !== dateIdx && i !== chIdx) { buckets[mk].sums[i] = 0; buckets[mk].cnt[i] = 0; } }); }
     const b = buckets[mk];
-    headers.forEach((h, i) => { if (i === dateIdx || i === brandIdx) return; const num = parseFloat(String(row[i]).replace(/[$€£,%]/g, '')); if (!isNaN(num)) { b.sums[i] += num; b.cnt[i] += 1; } });
+    headers.forEach((h, i) => { if (i === dateIdx || i === chIdx) return; const num = parseFloat(String(row[i]).replace(/[$€£,%]/g, '')); if (!isNaN(num)) { b.sums[i] += num; b.cnt[i] += 1; } });
   });
   const mks = Object.keys(buckets).sort((a, b) => buckets[a].order - buckets[b].order);
   const outRows = mks.map(mk => {
     const b = buckets[mk];
     return headers.map((h, i) => {
       if (i === dateIdx) return "'" + b.month;
-      if (i === brandIdx) return b.brand;
+      if (i === chIdx) return b.ch;
       let val = rateIdxs.has(i) ? (b.cnt[i] > 0 ? b.sums[i] / b.cnt[i] : 0) : b.sums[i];
       val = Math.round(val * 100) / 100; if (val % 1 === 0) val = Math.round(val);
       return String(val);
