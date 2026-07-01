@@ -19,15 +19,15 @@ async function scrape(c, df, dt, cp) {
   const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
-  // ── date_group_by: agar Col H me diya hai to wahi, warna range ke hisaab se AUTO ──
-  // Chhota range (<=45 din) => day-wise. Bada range => month-wise summary.
-  let groupBy = (c.report || '').toLowerCase();
-  if (!groupBy || groupBy === 'auto') {
-    const spanDays = daysBetween(df, dt) + 1;
-    groupBy = spanDays > 45 ? 'month' : 'day';
-  }
+  // Range span nikaalo — bada range (>45 din) = month-wise summary chahiye
+  const spanDays = daysBetween(df, dt) + 1;
+  const wantMonthly = spanDays > 45;
 
-  const toExclusive = addDays(dt, 1); // 'to' is exclusive per docs
+  // API se hamesha day-wise mangenge, phir khud group karenge (API ka month reliable nahi)
+  let groupBy = (c.report || '').toLowerCase();
+  if (!groupBy || groupBy === 'auto') groupBy = 'day';
+
+  const toExclusive = addDays(dt, 1);
 
   const path = '/api/customer/v1/partner/traffic_report';
   const headers = {
@@ -51,7 +51,6 @@ async function scrape(c, df, dt, cp) {
 
     console.log('  -> StarzPartners page', page, df, '->', toExclusive, '(' + groupBy + ')');
 
-    // fetch with retry on 429 (rate limit)
     const { ok, status, body } = await fetchWithRetry(url, headers, 4);
     if (!ok) {
       if (allRows.length > 0) {
@@ -59,7 +58,7 @@ async function scrape(c, df, dt, cp) {
         break;
       }
       throw new Error('StarzPartners API failed (' + status + '): ' + body.substring(0, 200)
-        + (status === 429 ? ' — rate limited. Try a smaller date range (e.g. Last Month) or use report:month.' : ''));
+        + (status === 429 ? ' — rate limited. Try a smaller date range.' : ''));
     }
 
     let data;
@@ -86,25 +85,29 @@ async function scrape(c, df, dt, cp) {
   const keys = headerNames.slice();
   allRows.forEach(o => Object.keys(o).forEach(k => { if (keys.indexOf(k) < 0) keys.push(k); }));
 
-  // Find the date column
   const dateKeyIdx = keys.findIndex(k => /date|day|month|period/i.test(k));
 
-  // ── FIX 1: 'to' exclusive hone par bhi API ek extra din ka row de deta hai.
-  //          Range ke bahar wale rows hata do (sirf day-wise data pe apply hota hai). ──
-  if (dateKeyIdx >= 0 && groupBy === 'day') {
-    const startNum = df.replace(/-/g, '');           // "20260630"
-    const endNum = dt.replace(/-/g, '');             // "20260630"
+  // ── FIX 1: 'to' exclusive hone par bhi extra din aata hai — range ke bahar hata do ──
+  if (dateKeyIdx >= 0) {
+    const startNum = df.replace(/-/g, '');
+    const endNum = dt.replace(/-/g, '');
     const before = allRows.length;
     allRows = allRows.filter(o => {
-      const raw = String(o[keys[dateKeyIdx]] || '').trim();
-      const norm = normalizeToYmdNum(raw);           // "20260630" ya null
-      if (!norm) return true;                        // parse na ho to rakho
+      const norm = normalizeToYmdNum(String(o[keys[dateKeyIdx]] || '').trim());
+      if (!norm) return true;
       return norm >= startNum && norm <= endNum;
     });
-    console.log('  -> StarzPartners date-filter:', before, '->', allRows.length, '(', df, 'to', dt, ')');
+    console.log('  -> StarzPartners date-filter:', before, '->', allRows.length);
   }
 
-  if (!allRows.length) throw new Error('StarzPartners: no rows in range ' + df + ' to ' + dt + ' after filter');
+  if (!allRows.length) throw new Error('StarzPartners: no rows in range after filter');
+
+  // ── FIX 2: Bada range = khud month-wise group karo (API day-wise deta hai) ──
+  if (wantMonthly && dateKeyIdx >= 0) {
+    const grouped = groupByMonth(allRows, keys, dateKeyIdx);
+    allRows = grouped;
+    console.log('  -> StarzPartners grouped into', allRows.length, 'months');
+  }
 
   const headerLabels = keys.map(prettyLabel);
   const rows = allRows.map(o => keys.map((k, idx) => {
@@ -112,14 +115,68 @@ async function scrape(c, df, dt, cp) {
     if (v === null || v === undefined) return '';
     v = String(v);
     if (idx === dateKeyIdx) {
+      // monthly me value already "2026-01" hai; daily me normalize karo
       const nd = normalizeDate(v);
-      if (nd) v = "'" + nd; // apostrophe => sheet keeps as text, no auto-format
+      if (nd) v = "'" + nd;
     }
     return v;
   }));
 
-  console.log('  -> StarzPartners', rows.length, 'rows across', totalPages, 'page(s) [' + groupBy + ']');
+  console.log('  -> StarzPartners', rows.length, 'rows [' + (wantMonthly ? 'monthly' : groupBy) + ']');
   return { headers: headerLabels, rows };
+}
+
+// ── Day-wise rows ko month-wise sum karo ──
+// Numeric columns add hote hain; rate columns (Cr = conversion rate %) recompute nahi,
+// unhe average kar dete hain (approx). Date column month label ban jata hai.
+function groupByMonth(rows, keys, dateIdx) {
+  const buckets = {}; // "2026-01" -> { sums:{}, counts:{}, order:n }
+  let order = 0;
+
+  // Kaunse columns rate/percent type hain (add nahi karne) — naam se guess
+  const rateIdxs = new Set();
+  keys.forEach((k, i) => {
+    if (i === dateIdx) return;
+    if (/(^cr$|rate|ratio|percent|%|avg|average)/i.test(k)) rateIdxs.add(i);
+  });
+
+  rows.forEach(o => {
+    const dnum = normalizeToYmdNum(String(o[keys[dateIdx]] || '').trim());
+    if (!dnum) return;
+    const monthKey = dnum.substring(0, 4) + '-' + dnum.substring(4, 6); // "2026-01"
+
+    if (!buckets[monthKey]) {
+      buckets[monthKey] = { sums: {}, cnt: {}, order: order++ };
+      keys.forEach((k, i) => { if (i !== dateIdx) { buckets[monthKey].sums[i] = 0; buckets[monthKey].cnt[i] = 0; } });
+    }
+    const b = buckets[monthKey];
+    keys.forEach((k, i) => {
+      if (i === dateIdx) return;
+      const num = parseFloat(String(o[k]).replace(/[$€£,%]/g, ''));
+      if (!isNaN(num)) { b.sums[i] += num; b.cnt[i] += 1; }
+    });
+  });
+
+  // Buckets ko rows me convert karo (month order me)
+  const monthKeys = Object.keys(buckets).sort((a, b) => buckets[a].order - buckets[b].order);
+  return monthKeys.map(mk => {
+    const b = buckets[mk];
+    const obj = {};
+    keys.forEach((k, i) => {
+      if (i === dateIdx) { obj[k] = mk; return; } // "2026-01"
+      let val = b.sums[i];
+      if (rateIdxs.has(i)) {
+        // rate column = average across days
+        val = b.cnt[i] > 0 ? (b.sums[i] / b.cnt[i]) : 0;
+        val = Math.round(val * 100) / 100;
+      } else {
+        val = Math.round(val * 100) / 100;
+        if (val % 1 === 0) val = Math.round(val);
+      }
+      obj[k] = val;
+    });
+    return obj;
+  });
 }
 
 async function fetchWithRetry(url, headers, maxTries) {
