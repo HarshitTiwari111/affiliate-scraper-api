@@ -1,13 +1,13 @@
 // ============================================================
 // STARZPARTNERS (BitStarz/SoftSwiss) — Partner REPORT API
-// Uses /partner/report endpoint (supports promo_ids filter!)
-// Fetches DATE-wise data for a SPECIFIC promo.
+// Uses /partner/report endpoint. Supports campaign_ids + promo_ids filter.
+// Date-wise data.
 //
-// Credentials from Code.gs fetchViaPuppeteer:
-//   c.token    -> STATISTIC_TOKEN     (Col C)
-//   c.baseUrl  -> https://starzpartners.com (Col H baseUrl:..., or default)
-//   c.promoIds -> "30482" or "30482,12345"  (Col H promoIds:...)
-//   c.campaignId -> optional (Col H campaignId:...)
+// Col H options:
+//   baseUrl:https://starzpartners.com
+//   campaignId:19941        -> poore campaign ka data
+//   promoIds:30482          -> sirf ek promo ka data
+//   columns:Date.Visits.Registrations.First Deposits
 // ============================================================
 
 async function scrape(c, df, dt, cp) {
@@ -15,6 +15,7 @@ async function scrape(c, df, dt, cp) {
   const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
+  const promoIds = String(c.promoIds || c.promo_ids || '').trim();
   const campaignIds = String(c.campaignId || c.campaign_ids || '').trim();
 
   const spanDays = daysBetween(df, dt) + 1;
@@ -28,9 +29,7 @@ async function scrape(c, df, dt, cp) {
     'User-Agent': 'Mozilla/5.0'
   };
 
-  // Columns we want from API (date auto-added via group_by)
   const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'ngr']);
-  // group_by date => date-wise rows. Add brand/campaign if you want more breakdown.
   const groupBy = JSON.stringify(['date']);
 
   let allRows = [];
@@ -50,16 +49,13 @@ async function scrape(c, df, dt, cp) {
       + '&exchange_rates_date=' + encodeURIComponent(dt)
       + '&page=' + page;
 
-    // Campaign filter — poore campaign ka data (UI jaisa)
-    if (campaignIds) {
-      url += '&campaign_ids=' + encodeURIComponent(campaignIds);
-    }
-    // Promo filter — sirf ek promo ka data
-    if (promoIds) {
-      url += '&promo_ids=' + encodeURIComponent(promoIds);
-    }
+    // Campaign filter (poore campaign ka data — UI jaisa)
+    if (campaignIds) url += '&campaign_ids=' + encodeURIComponent(campaignIds);
+    // Promo filter (sirf ek promo ka data)
+    if (promoIds) url += '&promo_ids=' + encodeURIComponent(promoIds);
 
-    console.log('  -> StarzPartners /report page', page, df, '->', dt, promoIds ? '(promo ' + promoIds + ')' : '');
+    console.log('  -> StarzPartners /report page', page, df, '->', dt,
+      (campaignIds ? '(campaign ' + campaignIds + ')' : '') + (promoIds ? '(promo ' + promoIds + ')' : ''));
 
     const { ok, status, body } = await fetchWithRetry(url, headers, 4);
     if (!ok) {
@@ -72,7 +68,6 @@ async function scrape(c, df, dt, cp) {
     try { data = JSON.parse(body); }
     catch (e) { throw new Error('StarzPartners: response not JSON: ' + body.substring(0, 250)); }
 
-    // Response format: data.rows.data = [ [ {name,value}, ... ], ... ]
     const dataRows = (data.rows && data.rows.data) ? data.rows.data : [];
     dataRows.forEach(cells => {
       if (!headerNames) headerNames = cells.map(c => c.name);
@@ -87,14 +82,16 @@ async function scrape(c, df, dt, cp) {
     if (page > 100) break;
   } while (page <= totalPages);
 
-  if (!allRows.length || !headerNames) throw new Error('StarzPartners: no rows for promo ' + promoIds + ' (' + df + ' to ' + dt + '). Is promo me is range me data nahi ho sakta.');
+  if (!allRows.length || !headerNames) {
+    const what = campaignIds ? ('campaign ' + campaignIds) : (promoIds ? ('promo ' + promoIds) : 'account');
+    throw new Error('StarzPartners: no rows for ' + what + ' (' + df + ' to ' + dt + '). Is range me data nahi ho sakta.');
+  }
 
   const keys = headerNames.slice();
   allRows.forEach(o => Object.keys(o).forEach(k => { if (keys.indexOf(k) < 0) keys.push(k); }));
 
   const dateKeyIdx = keys.findIndex(k => /date|day|month|period/i.test(k));
 
-  // Date range filter (safety)
   if (dateKeyIdx >= 0) {
     const startNum = df.replace(/-/g, '');
     const endNum = dt.replace(/-/g, '');
@@ -107,7 +104,6 @@ async function scrape(c, df, dt, cp) {
 
   if (!allRows.length) throw new Error('StarzPartners: no rows in range after filter');
 
-  // Bada range => month-wise group
   if (wantMonthly && dateKeyIdx >= 0) {
     allRows = groupByMonth(allRows, keys, dateKeyIdx);
     console.log('  -> grouped into', allRows.length, 'months');
