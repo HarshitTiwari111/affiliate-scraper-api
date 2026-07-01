@@ -161,10 +161,10 @@ app.get('/starz-report', async (q, r) => {
       const url = base + '/api/customer/v1/partner/report'
         + '?columns=' + encodeURIComponent(columns)
         + '&group_by=' + encodeURIComponent(gb)
-        + '&from=2026-06-25&to=2026-07-01'
+        + '&from=' + (q.query.from || '2026-06-25') + '&to=' + (q.query.to || '2026-07-01')
         + '&period=custom'
         + '&conversion_currency=EUR&convert_all_currencies=1'
-        + '&exchange_rates_date=2026-07-01'
+        + '&exchange_rates_date=' + (q.query.to || '2026-07-01')
         + '&promo_ids=30482'
         + '&promo_codes=' + encodeURIComponent('[]')
         + '&strategies=' + encodeURIComponent('[]')
