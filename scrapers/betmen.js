@@ -45,11 +45,19 @@ async function scrape(c, df, dt, cp) {
       const headers = { 'Accept': 'application/xml', 'User-Agent': 'Mozilla/5.0' };
       for (const k in style) headers[k] = style[k];
 
+      // Breakdown params — Col H se 'breakdown' key, ya default Day+Brand+Country
+      const bd = (c.breakdown || 'day,brand,country').toLowerCase();
+      let bdParams = '';
+      if (bd.indexOf('day') >= 0) bdParams += '&Day=1';
+      if (bd.indexOf('brand') >= 0) bdParams += '&Brand=1';
+      if (bd.indexOf('country') >= 0) bdParams += '&Country=1';
+      if (bd.indexOf('media') >= 0) bdParams += '&Media=1';
+
       const url = base + '/api/'
         + '?command=' + encodeURIComponent(command)
         + '&fromdate=' + encodeURIComponent(cf)
         + '&todate=' + encodeURIComponent(ct)
-        + '&Day=1&Brand=1';
+        + bdParams;
 
       let resp, body;
       try {
@@ -62,7 +70,7 @@ async function scrape(c, df, dt, cp) {
 
       // Auth failure — chhote error responses
       if (trimmed.length < 200 &&
-          (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
+        (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
           || low.indexOf('not authenticated') >= 0 || low.indexOf('access denied') >= 0)) {
         lastErr = trimmed.substring(0, 120);
         const uh = Object.keys(style).find(k => k !== 'affiliateid') || '?';
@@ -97,7 +105,7 @@ async function scrape(c, df, dt, cp) {
   }
 
   // Column order fix — Day pehle, phir baaki
-  const preferredOrder = ['Day', 'Brand', 'Impressions', 'Visitors', 'Unique_Visitors', 'Registrations', 'QFTD', 'Deposits', 'Commission'];
+  const preferredOrder = ['Day', 'Brand', 'Country', 'Impressions', 'Visitors', 'Unique_Visitors', 'Registrations', 'QFTD', 'Deposits', 'Commission'];
   let keys = [];
   preferredOrder.forEach(k => { if (headerNames.indexOf(k) >= 0) keys.push(k); });
   headerNames.forEach(k => { if (keys.indexOf(k) < 0) keys.push(k); }); // baaki jo bache
