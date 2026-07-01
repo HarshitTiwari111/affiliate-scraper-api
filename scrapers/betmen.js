@@ -38,6 +38,7 @@ async function scrape(c, df, dt, cp) {
   let isXml = false;
   let workingStyle = null;
   let lastErr = '';
+  let rawSample = ''; // debug ke liye pehla raw response yaad rakho
 
   for (const [cf, ct] of chunks) {
     let chunkDone = false;
@@ -84,6 +85,8 @@ async function scrape(c, df, dt, cp) {
       if (!resp.ok) { lastErr = 'HTTP ' + resp.status + ': ' + trimmed.substring(0, 120); continue; }
 
       // ── Success — parse ──
+      if (!rawSample) rawSample = trimmed.substring(0, 300); // pehla response yaad rakho
+
       let parsedRows = [];
       if (trimmed.startsWith('<')) {
         isXml = true;
@@ -113,8 +116,10 @@ async function scrape(c, df, dt, cp) {
   }
 
   if (!allRows.length || !headerNames) {
-    // Auth chal gaya par data khaali — ye error nahi, bas is range me data nahi
-    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me koi data nahi (command: ' + command + '). Dusra date range try kar.');
+    // Auth chal gaya par rows nahi mile — ya to account khaali hai, ya response structure alag
+    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me koi row nahi mili (command: ' + command + '). '
+      + 'Ya to is account me data nahi hai, ya response structure alag hai. '
+      + 'Server ne bheja: "' + (rawSample || 'empty') + '"');
   }
 
   const keys = headerNames.slice();
@@ -135,21 +140,52 @@ async function scrape(c, df, dt, cp) {
 }
 
 // ---- helpers ----
+
+// Cellxpert responses vary a LOT — is function ko strong banaya hai.
+// Nested (Data.Rows, result.data, report.rows), case-insensitive keys, sab handle karta hai.
 function extractJsonRows(data) {
-  if (Array.isArray(data)) return data;
-  const candidates = ['data', 'rows', 'records', 'report', 'results', 'items', 'mediareport', 'commissions'];
-  for (const key of candidates) {
-    if (data[key]) {
-      if (Array.isArray(data[key])) return data[key];
-      if (typeof data[key] === 'object') {
-        for (const k2 of candidates) { if (Array.isArray(data[key][k2])) return data[key][k2]; }
+  if (!data) return [];
+  if (Array.isArray(data)) return data.filter(x => x && typeof x === 'object');
+
+  if (typeof data !== 'object') return [];
+
+  // Direct array candidates (case-insensitive)
+  const candidates = ['data', 'rows', 'records', 'report', 'results', 'items', 'mediareport', 'commissions', 'result', 'stats', 'reportdata'];
+
+  // Level 1: koi bhi key jiski value array ho
+  for (const realKey of Object.keys(data)) {
+    if (candidates.indexOf(realKey.toLowerCase()) >= 0 && Array.isArray(data[realKey])) {
+      return data[realKey].filter(x => x && typeof x === 'object');
+    }
+  }
+
+  // Level 2: nested object ke andar array dhoondo (Data.Rows type)
+  for (const realKey of Object.keys(data)) {
+    const val = data[realKey];
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      for (const innerKey of Object.keys(val)) {
+        if (Array.isArray(val[innerKey]) && val[innerKey].length && typeof val[innerKey][0] === 'object') {
+          return val[innerKey].filter(x => x && typeof x === 'object');
+        }
       }
     }
   }
-  if (typeof data === 'object') {
-    const vals = Object.values(data).filter(v => v && typeof v === 'object');
-    if (vals.length && vals.every(v => !Array.isArray(v))) return vals;
+
+  // Level 3: koi bhi top-level array (naam kuch bhi ho)
+  for (const realKey of Object.keys(data)) {
+    if (Array.isArray(data[realKey]) && data[realKey].length && typeof data[realKey][0] === 'object') {
+      return data[realKey].filter(x => x && typeof x === 'object');
+    }
   }
+
+  // Level 4: object-of-objects -> uski values (jaise {"0":{...},"1":{...}})
+  const vals = Object.values(data).filter(v => v && typeof v === 'object' && !Array.isArray(v));
+  if (vals.length && vals.length > 0) {
+    // sirf tab jab har value me multiple fields hon (matlab ye rows hain, metadata nahi)
+    const looksLikeRows = vals.every(v => Object.keys(v).length >= 2);
+    if (looksLikeRows) return vals;
+  }
+
   return [];
 }
 
