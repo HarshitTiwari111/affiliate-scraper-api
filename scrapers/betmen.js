@@ -1,6 +1,6 @@
 // ============================================================
 // BETMEN AFFILIATES — Cellxpert API (API key)
-// Auto-tries multiple auth header styles + trims key.
+// Handles JSON, XML, AND CSV responses (this install returns CSV).
 //
 // Credentials from Code.gs fetchViaPuppeteer:
 //   c.affiliateId -> Col C  (36451)
@@ -12,7 +12,7 @@
 async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://track.betmenaffiliates.com').replace(/\/+$/, '');
   const affiliateId = String(c.affiliateId || c.username || '').trim();
-  const apiKey = String(c.apiKey || c.password || '').trim(); // TRIM — hidden space hata do
+  const apiKey = String(c.apiKey || c.password || '').trim();
   const command = (c.report || 'mediareport').toLowerCase();
 
   if (!affiliateId) throw new Error('Betmen: affiliateId missing (Col C).');
@@ -20,7 +20,6 @@ async function scrape(c, df, dt, cp) {
 
   console.log('  -> Betmen affId=' + affiliateId + ' keyLen=' + apiKey.length);
 
-  // Different header styles Cellxpert installs use — try each until one works
   const authStyles = [
     { 'affiliateid': affiliateId, 'x-api-key': apiKey },
     { 'affiliateid': affiliateId, 'apikey': apiKey },
@@ -28,22 +27,19 @@ async function scrape(c, df, dt, cp) {
     { 'affiliateid': affiliateId, 'Authorization': apiKey },
     { 'affiliateid': affiliateId, 'Authorization': 'Bearer ' + apiKey },
     { 'affiliateid': affiliateId, 'api-key': apiKey },
-    // key as query param instead of header
     { 'affiliateid': affiliateId, '__queryKey': apiKey }
   ];
 
   const chunks = splitRange(df, dt, 31);
   let allRows = [];
   let headerNames = null;
-  let isXml = false;
+  let format = 'json';
   let workingStyle = null;
   let lastErr = '';
-  let rawSample = ''; // debug ke liye pehla raw response yaad rakho
+  let rawSample = '';
 
   for (const [cf, ct] of chunks) {
     let chunkDone = false;
-
-    // Agar ek style pehle chunk me chal gayi, aage usi ko use karo
     const stylesToTry = workingStyle ? [workingStyle] : authStyles;
 
     for (const style of stylesToTry) {
@@ -54,7 +50,6 @@ async function scrape(c, df, dt, cp) {
         + '&todate=' + encodeURIComponent(ct)
         + '&Day=1&Brand=1&json=1';
 
-      // Copy style into headers (except the special __queryKey)
       for (const k in style) {
         if (k === '__queryKey') url += '&apikey=' + encodeURIComponent(style[k]) + '&key=' + encodeURIComponent(style[k]);
         else headers[k] = style[k];
@@ -69,57 +64,62 @@ async function scrape(c, df, dt, cp) {
       const trimmed = body.trim();
       const low = trimmed.toLowerCase();
 
-      // Auth failure — is style ko chhod ke agli try karo
-      if (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
+      // Auth failure detect — but careful: CSV data me bhi "authentication" word ho sakta hai,
+      // isliye sirf CHHOTE responses (jo clearly error message hain) ko auth-fail maano
+      if (trimmed.length < 200 &&
+          (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
           || low.indexOf('not authenticated') >= 0 || low.indexOf('access denied') >= 0
-          || (low.indexOf('invalid') >= 0 && low.indexOf('key') >= 0)) {
+          || (low.indexOf('invalid') >= 0 && low.indexOf('key') >= 0))) {
         lastErr = trimmed.substring(0, 120);
-        const usedHeader = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
-        console.log('  -> auth fail with [' + usedHeader + ']: ' + lastErr);
+        const uh = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
+        console.log('  -> auth fail with [' + uh + ']: ' + lastErr);
         continue;
       }
-      if (low.indexOf('ip not authenticated') >= 0) {
+      if (trimmed.length < 200 && low.indexOf('ip not authenticated') >= 0) {
         const ipm = trimmed.match(/(\d+\.\d+\.\d+\.\d+)/);
-        throw new Error('Betmen IP block: ' + (ipm ? ipm[1] : '?') + ' — /myip se IP le ke Betmen panel me whitelist karo.');
+        throw new Error('Betmen IP block: ' + (ipm ? ipm[1] : '?') + ' — /myip se IP le ke whitelist karo.');
       }
       if (!resp.ok) { lastErr = 'HTTP ' + resp.status + ': ' + trimmed.substring(0, 120); continue; }
 
-      // ── Success — parse ──
-      if (!rawSample) rawSample = trimmed.substring(0, 300); // pehla response yaad rakho
+      if (!rawSample) rawSample = trimmed.substring(0, 300);
 
+      // ── Format detect karo: XML / JSON / CSV ──
       let parsedRows = [];
       if (trimmed.startsWith('<')) {
-        isXml = true;
+        format = 'xml';
         parsedRows = parseXmlRows(trimmed);
+      } else if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        // JSON try karo
+        try {
+          const data = JSON.parse(body);
+          parsedRows = extractJsonRows(data);
+          format = 'json';
+        } catch (e) {
+          // JSON fail — CSV try karo
+          parsedRows = parseCsvRows(trimmed);
+          format = 'csv';
+        }
       } else {
-        let data;
-        try { data = JSON.parse(body); }
-        catch (e) { lastErr = 'not JSON/XML: ' + trimmed.substring(0, 120); continue; }
-        parsedRows = extractJsonRows(data);
+        // JSON/XML nahi hai — CSV/delimited hai (ye Betmen install CSV bhejta hai)
+        parsedRows = parseCsvRows(trimmed);
+        format = 'csv';
       }
 
-      // Parse hua (khaali bhi ho sakta hai — wo valid hai)
-      const usedHeader = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
-      console.log('  -> Betmen OK via [' + usedHeader + '], ' + parsedRows.length + ' rows for ' + cf);
-      workingStyle = style; // aage isi ko use karo
+      const uh = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
+      console.log('  -> Betmen OK via [' + uh + '] (' + format + '), ' + parsedRows.length + ' rows for ' + cf);
+      workingStyle = style;
       parsedRows.forEach(o => { if (!headerNames) headerNames = Object.keys(o); allRows.push(o); });
       chunkDone = true;
       break;
     }
 
     if (!chunkDone && !workingStyle) {
-      // Koi bhi auth style kaam nahi kari
-      throw new Error('Betmen: koi auth style kaam nahi kari. '
-        + 'ID (' + affiliateId + ') aur key (Col J) same Betmen account ke hone chahiye. '
-        + 'Last server response: "' + lastErr + '"');
+      throw new Error('Betmen: koi auth style kaam nahi kari. ID (' + affiliateId + ') aur key same account ke hone chahiye. Last: "' + lastErr + '"');
     }
   }
 
   if (!allRows.length || !headerNames) {
-    // Auth chal gaya par rows nahi mile — ya to account khaali hai, ya response structure alag
-    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me koi row nahi mili (command: ' + command + '). '
-      + 'Ya to is account me data nahi hai, ya response structure alag hai. '
-      + 'Server ne bheja: "' + (rawSample || 'empty') + '"');
+    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me row parse nahi hui. Server ne bheja: "' + (rawSample || 'empty') + '"');
   }
 
   const keys = headerNames.slice();
@@ -135,57 +135,76 @@ async function scrape(c, df, dt, cp) {
     return v;
   }));
 
-  console.log('  -> Betmen', rows.length, 'rows (' + (isXml ? 'xml' : 'json') + ')');
+  console.log('  -> Betmen', rows.length, 'rows (' + format + ')');
   return { headers: headerLabels, rows };
 }
 
-// ---- helpers ----
+// ---- CSV parser (Betmen ka main format) ----
+function parseCsvRows(text) {
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (!text) return [];
 
-// Cellxpert responses vary a LOT — is function ko strong banaya hai.
-// Nested (Data.Rows, result.data, report.rows), case-insensitive keys, sab handle karta hai.
+  // Delimiter detect: comma, semicolon, ya tab
+  const firstLine = text.split('\n')[0];
+  let delim = ',';
+  if (firstLine.indexOf(';') >= 0 && firstLine.indexOf(',') < 0) delim = ';';
+  else if (firstLine.indexOf('\t') >= 0) delim = '\t';
+
+  // Quote-aware CSV parse
+  const records = [];
+  let field = '', row = [], inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += ch;
+    } else {
+      if (ch === '"') inQ = true;
+      else if (ch === delim) { row.push(field); field = ''; }
+      else if (ch === '\n') { row.push(field); records.push(row); field = ''; row = []; }
+      else field += ch;
+    }
+  }
+  if (field.length || row.length) { row.push(field); records.push(row); }
+
+  if (records.length < 2) return []; // sirf header ya khaali
+
+  const headers = records[0].map(h => h.trim());
+  const rows = [];
+  for (let i = 1; i < records.length; i++) {
+    const r = records[i];
+    if (!r.some(c => c && c.trim().length)) continue; // khaali row skip
+    const first = String(r[0] || '').trim().toLowerCase();
+    if (first === 'total' || first === 'totals' || first === 'summary') continue; // total row skip
+    const obj = {};
+    headers.forEach((h, idx) => { obj[h || ('col' + idx)] = (r[idx] !== undefined ? r[idx] : ''); });
+    rows.push(obj);
+  }
+  return rows;
+}
+
+// ---- JSON helper ----
 function extractJsonRows(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data.filter(x => x && typeof x === 'object');
-
   if (typeof data !== 'object') return [];
-
-  // Direct array candidates (case-insensitive)
   const candidates = ['data', 'rows', 'records', 'report', 'results', 'items', 'mediareport', 'commissions', 'result', 'stats', 'reportdata'];
-
-  // Level 1: koi bhi key jiski value array ho
-  for (const realKey of Object.keys(data)) {
-    if (candidates.indexOf(realKey.toLowerCase()) >= 0 && Array.isArray(data[realKey])) {
-      return data[realKey].filter(x => x && typeof x === 'object');
-    }
+  for (const rk of Object.keys(data)) {
+    if (candidates.indexOf(rk.toLowerCase()) >= 0 && Array.isArray(data[rk])) return data[rk].filter(x => x && typeof x === 'object');
   }
-
-  // Level 2: nested object ke andar array dhoondo (Data.Rows type)
-  for (const realKey of Object.keys(data)) {
-    const val = data[realKey];
+  for (const rk of Object.keys(data)) {
+    const val = data[rk];
     if (val && typeof val === 'object' && !Array.isArray(val)) {
-      for (const innerKey of Object.keys(val)) {
-        if (Array.isArray(val[innerKey]) && val[innerKey].length && typeof val[innerKey][0] === 'object') {
-          return val[innerKey].filter(x => x && typeof x === 'object');
-        }
+      for (const ik of Object.keys(val)) {
+        if (Array.isArray(val[ik]) && val[ik].length && typeof val[ik][0] === 'object') return val[ik].filter(x => x && typeof x === 'object');
       }
     }
   }
-
-  // Level 3: koi bhi top-level array (naam kuch bhi ho)
-  for (const realKey of Object.keys(data)) {
-    if (Array.isArray(data[realKey]) && data[realKey].length && typeof data[realKey][0] === 'object') {
-      return data[realKey].filter(x => x && typeof x === 'object');
-    }
+  for (const rk of Object.keys(data)) {
+    if (Array.isArray(data[rk]) && data[rk].length && typeof data[rk][0] === 'object') return data[rk].filter(x => x && typeof x === 'object');
   }
-
-  // Level 4: object-of-objects -> uski values (jaise {"0":{...},"1":{...}})
   const vals = Object.values(data).filter(v => v && typeof v === 'object' && !Array.isArray(v));
-  if (vals.length && vals.length > 0) {
-    // sirf tab jab har value me multiple fields hon (matlab ye rows hain, metadata nahi)
-    const looksLikeRows = vals.every(v => Object.keys(v).length >= 2);
-    if (looksLikeRows) return vals;
-  }
-
+  if (vals.length && vals.every(v => Object.keys(v).length >= 2)) return vals;
   return [];
 }
 
@@ -194,10 +213,7 @@ function parseXmlRows(xml) {
   const tagMatch = xml.match(/<(\w+)>\s*<(\w+)>/);
   let rowTag = null;
   if (tagMatch) rowTag = tagMatch[2];
-  if (!rowTag) {
-    const m = xml.match(/<(\w+)>[^<]*<\w+>/g);
-    if (m && m.length) { const t = m[0].match(/<(\w+)>/); if (t) rowTag = t[1]; }
-  }
+  if (!rowTag) { const m = xml.match(/<(\w+)>[^<]*<\w+>/g); if (m && m.length) { const t = m[0].match(/<(\w+)>/); if (t) rowTag = t[1]; } }
   if (!rowTag) return rows;
   const re = new RegExp('<' + rowTag + '>([\\s\\S]*?)<\\/' + rowTag + '>', 'g');
   let r;
@@ -227,7 +243,7 @@ function splitRange(df, dt, maxDays) {
 function ymd(d) { return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
 function normalizeDate(s) {
   s = String(s).trim(); let m;
-  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+  m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/); if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
   m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
   if (m) { let d = +m[1], mo = +m[2], y = +m[3]; if (d > 12) return y + '-' + pad(mo) + '-' + pad(d); if (mo > 12) return y + '-' + pad(d) + '-' + pad(mo); return y + '-' + pad(mo) + '-' + pad(d); }
   return null;
