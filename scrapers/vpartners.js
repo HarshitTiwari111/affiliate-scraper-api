@@ -1,20 +1,10 @@
 // ============================================================
-// V.PARTNERS Remote Statistics scraper (Render / Node)
-// NO browser, NO Puppeteer — just a JSON API call.
-//
-// Place at: scrapers/vpartners.js   (replaces the old Puppeteer one)
-//
-// Credentials sent from Code.gs fetchViaPuppeteer:
-//   c.username -> remote-stats TOKEN   (Col C)
-//   c.baseUrl  -> https://v.partners   (from Col H baseUrl:..., or default)
-//
-// API: GET {base}/api/stats?token=XXX&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
-// Response shape: { "YYYY-MM-DD": [ {row}, {row} ], ... }
+// V.PARTNERS Remote Statistics scraper — NO browser, JSON API.
+// Fix: This Year => month-wise summary.
 // ============================================================
 
 async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://v.partners').replace(/\/+$/, '');
-  // token may arrive as username (Col C) or as an explicit token field
   const token = c.token || c.username || c.email;
   if (!token) throw new Error('V.Partners: remote-stats token missing (Col C).');
 
@@ -32,24 +22,18 @@ async function scrape(c, df, dt, cp) {
   try { data = JSON.parse(body); }
   catch (e) { throw new Error('V.Partners: response not JSON: ' + body.substring(0, 250)); }
 
-  // Flatten { "date": [ {row}, ... ] } into one array
   let allRows = [];
   if (Array.isArray(data)) {
     allRows = data;
   } else if (data && typeof data === 'object') {
     for (const dateKey of Object.keys(data)) {
       const arr = data[dateKey];
-      if (Array.isArray(arr)) {
-        arr.forEach(r => { if (r && typeof r === 'object' && !r.stats_date) r.stats_date = dateKey; allRows.push(r); });
-      } else if (arr && typeof arr === 'object') {
-        if (!arr.stats_date) arr.stats_date = dateKey;
-        allRows.push(arr);
-      }
+      if (Array.isArray(arr)) { arr.forEach(r => { if (r && typeof r === 'object' && !r.stats_date) r.stats_date = dateKey; allRows.push(r); }); }
+      else if (arr && typeof arr === 'object') { if (!arr.stats_date) arr.stats_date = dateKey; allRows.push(arr); }
     }
   }
   if (!allRows.length) throw new Error('V.Partners: no rows for ' + df + ' to ' + dt);
 
-  // Friendly column subset (only those present)
   const firstKeys = Object.keys(allRows[0]);
   const preferred = [
     ['stats_date', 'Date'], ['title', 'Brand'], ['rotator', 'Rotator'],
@@ -73,12 +57,47 @@ async function scrape(c, df, dt, cp) {
     return String(v);
   }));
 
-  // Sort by date asc
   const dIdx = cols.findIndex(c => c[0] === 'stats_date');
   if (dIdx >= 0) rows.sort((a, b) => String(a[dIdx]).localeCompare(String(b[dIdx])));
+
+  // Bada range (>45 din) => month-wise summary
+  if (spanDays(df, dt) > 45 && dIdx >= 0) {
+    const g = groupRowsByMonth(headers, rows, dIdx);
+    rows = g.rows;
+    console.log('  -> V.Partners grouped into', rows.length, 'months');
+  }
 
   console.log('  -> V.Partners', rows.length, 'rows');
   return { headers, rows };
 }
+
+// ---- month grouping (self-contained) ----
+function groupRowsByMonth(headers, rows, dateIdx) {
+  const rateIdxs = new Set();
+  headers.forEach((h, i) => { if (i !== dateIdx && /(^cr$|rate|ratio|percent|%|avg|average|conversion)/i.test(String(h))) rateIdxs.add(i); });
+  const buckets = {}; let order = 0;
+  rows.forEach(row => {
+    const dnum = ymdNum(String(row[dateIdx] || '').replace(/^'/, '').trim());
+    if (!dnum) return;
+    const mk = dnum.substring(0, 4) + '-' + dnum.substring(4, 6);
+    if (!buckets[mk]) { buckets[mk] = { sums: {}, cnt: {}, order: order++ }; headers.forEach((h, i) => { if (i !== dateIdx) { buckets[mk].sums[i] = 0; buckets[mk].cnt[i] = 0; } }); }
+    const b = buckets[mk];
+    headers.forEach((h, i) => { if (i === dateIdx) return; const num = parseFloat(String(row[i]).replace(/[$€£,%]/g, '')); if (!isNaN(num)) { b.sums[i] += num; b.cnt[i] += 1; } });
+  });
+  const mks = Object.keys(buckets).sort((a, b) => buckets[a].order - buckets[b].order);
+  const outRows = mks.map(mk => {
+    const b = buckets[mk];
+    return headers.map((h, i) => {
+      if (i === dateIdx) return "'" + mk;
+      let val = rateIdxs.has(i) ? (b.cnt[i] > 0 ? b.sums[i] / b.cnt[i] : 0) : b.sums[i];
+      val = Math.round(val * 100) / 100; if (val % 1 === 0) val = Math.round(val);
+      return String(val);
+    });
+  });
+  return { headers, rows: outRows };
+}
+function spanDays(df, dt) { const d1 = new Date(df + 'T00:00:00Z'), d2 = new Date(dt + 'T00:00:00Z'); return Math.round((d2 - d1) / 86400000) + 1; }
+function ymdNum(s) { s = String(s).trim(); let m; m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + pad(m[2]) + pad(m[3]); m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/); if (m) { let d = +m[1], mo = +m[2], y = +m[3]; if (d > 12) return y + pad(mo) + pad(d); if (mo > 12) return y + pad(d) + pad(mo); return y + pad(mo) + pad(d); } return null; }
+function pad(n) { return String(n).padStart(2, '0'); }
 
 module.exports = { scrape };
