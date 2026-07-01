@@ -20,6 +20,34 @@ app.get('/myip', async (q, r) => {
   } catch (e) { r.json({ error: e.message }); }
 });
 
+// ============================================================
+// TEMPORARY DEBUG — Betmen ka EXACT raw response dekhne ke liye
+// Browser me khol: /betmen-raw?key=YOUR_API_KEY
+// ============================================================
+app.get('/betmen-raw', async (q, r) => {
+  try {
+    const key = q.query.key || '';
+    const affId = q.query.aff || '36451';
+    const results = {};
+    // json=1 KE SAATH aur BINA — dono try karo
+    for (const suffix of ['&json=1', '']) {
+      const url = 'https://track.betmenaffiliates.com/api/'
+        + '?command=mediareport&fromdate=2026-06-30&todate=2026-06-30&Day=1&Brand=1' + suffix;
+      const resp = await fetch(url, {
+        headers: { 'affiliateid': affId, 'x-api-key': key, 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+      });
+      const body = await resp.text();
+      results[suffix ? 'with_json' : 'without_json'] = {
+        status: resp.status,
+        contentType: resp.headers.get('content-type'),
+        length: body.length,
+        full: body.substring(0, 3000)
+      };
+    }
+    r.json(results);
+  } catch (e) { r.json({ error: e.message }); }
+});
+
 app.post('/scrape', async (q, r) => {
   const { platform, dateFrom, dateTo, credentials } = q.body;
   if (!platform || !dateFrom || !dateTo || !credentials) {
