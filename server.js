@@ -84,8 +84,9 @@ app.get('/elite-raw', async (q, r) => {
 });
 
 // ============================================================
-// TEMPORARY DEBUG — StarzPartners me promo filter param try karne ke liye
+// TEMPORARY DEBUG — StarzPartners promo filter (with delays to avoid 429)
 // Browser me khol: /starz-raw?token=YOUR_STARZ_TOKEN
+// NOTE: ~25 sec lagega (gap de raha hai) — page load hone de, band mat karna.
 // ============================================================
 app.get('/starz-raw', async (q, r) => {
   try {
@@ -95,35 +96,45 @@ app.get('/starz-raw', async (q, r) => {
     const from = '2026-06-25';
     const to = '2026-07-02';
     const headers = { 'Accept': 'application/json', 'Authorization': String(token), 'User-Agent': 'Mozilla/5.0' };
+    const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-    // Alag-alag promo filter params try karo
-    const tries = {
-      'no_filter': '?from=' + from + '&to=' + to + '&date_group_by=day',
-      'promo_id': '?from=' + from + '&to=' + to + '&date_group_by=day&promo_id=30482',
-      'campaign_id': '?from=' + from + '&to=' + to + '&date_group_by=day&campaign_id=19941',
-      'filter_promo': '?from=' + from + '&to=' + to + '&date_group_by=day&filter[promo_id]=30482',
-      'filter_campaign': '?from=' + from + '&to=' + to + '&date_group_by=day&filter[campaign_id]=19941',
-      'group_by_promo': '?from=' + from + '&to=' + to + '&date_group_by=day&group_by=promo',
-      'promo_hash': '?from=' + from + '&to=' + to + '&date_group_by=day&promo=b975e1edd'
-    };
+    // Ek-ek karke test karo, beech me gap (429 se bachne ke liye)
+    const tries = [
+      ['no_filter', '?from=' + from + '&to=' + to + '&date_group_by=day'],
+      ['promo_id', '?from=' + from + '&to=' + to + '&date_group_by=day&promo_id=30482'],
+      ['promos_array', '?from=' + from + '&to=' + to + '&date_group_by=day&promos[]=30482'],
+      ['campaign_promo', '?from=' + from + '&to=' + to + '&date_group_by=day&campaign_id=19941&promo_id=30482'],
+      ['group_by_promo_full', '?from=' + from + '&to=' + to + '&date_group_by=promo']
+    ];
 
     const out = {};
-    for (const name of Object.keys(tries)) {
-      try {
-        const resp = await fetch(base + path + tries[name], { headers });
-        const body = await resp.text();
-        let totalVisits = '?';
-        let rowCount = '?';
+    for (const [name, qs] of tries) {
+      let done = false;
+      // Har try ko 429 pe 3 baar retry karo
+      for (let attempt = 0; attempt < 3 && !done; attempt++) {
         try {
-          const d = JSON.parse(body);
-          const rows = (d.rows && d.rows.data) ? d.rows.data : [];
-          rowCount = rows.length;
-          let v = 0;
-          rows.forEach(cells => { cells.forEach(c => { if (/visit/i.test(c.name)) v += parseFloat(c.value) || 0; }); });
-          totalVisits = v;
-        } catch (e) {}
-        out[name] = { status: resp.status, rowCount: rowCount, totalVisits: totalVisits, preview: body.substring(0, 200) };
-      } catch (e) { out[name] = { error: e.message }; }
+          const resp = await fetch(base + path + qs, { headers });
+          const body = await resp.text();
+          if (resp.status === 429) {
+            await sleep(4000); // rate limited — 4 sec ruk ke retry
+            continue;
+          }
+          let totalVisits = '?', rowCount = '?', colNames = [];
+          try {
+            const d = JSON.parse(body);
+            const rows = (d.rows && d.rows.data) ? d.rows.data : [];
+            rowCount = rows.length;
+            if (rows.length && rows[0]) colNames = rows[0].map(c => c.name);
+            let v = 0;
+            rows.forEach(cells => { cells.forEach(c => { if (/visit/i.test(c.name)) v += parseFloat(c.value) || 0; }); });
+            totalVisits = v;
+          } catch (e) {}
+          out[name] = { status: resp.status, rowCount: rowCount, totalVisits: totalVisits, columns: colNames, preview: body.substring(0, 250) };
+          done = true;
+        } catch (e) { out[name] = { error: e.message }; done = true; }
+      }
+      if (!done) out[name] = { status: 429, note: 'still rate-limited after retries' };
+      await sleep(3000); // agla try se pehle 3 sec gap
     }
     r.json(out);
   } catch (e) { r.json({ error: e.message }); }
