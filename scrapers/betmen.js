@@ -1,6 +1,7 @@
 // ============================================================
 // BETMEN AFFILIATES — Cellxpert API (API key)
-// Handles JSON, XML, AND CSV responses (this install returns CSV).
+// Handles JSON, XML, and ANY delimited text (tab/comma/semicolon/multi-space).
+// Auto-detects delimiter. Shows exact bytes on failure.
 //
 // Credentials from Code.gs fetchViaPuppeteer:
 //   c.affiliateId -> Col C  (36451)
@@ -33,7 +34,7 @@ async function scrape(c, df, dt, cp) {
   const chunks = splitRange(df, dt, 31);
   let allRows = [];
   let headerNames = null;
-  let format = 'json';
+  let format = '?';
   let workingStyle = null;
   let lastErr = '';
   let rawSample = '';
@@ -64,8 +65,7 @@ async function scrape(c, df, dt, cp) {
       const trimmed = body.trim();
       const low = trimmed.toLowerCase();
 
-      // Auth failure detect — but careful: CSV data me bhi "authentication" word ho sakta hai,
-      // isliye sirf CHHOTE responses (jo clearly error message hain) ko auth-fail maano
+      // Auth failure — sirf chhote responses (clearly error) ko auth-fail maano
       if (trimmed.length < 200 &&
           (low.indexOf('bad authentication') >= 0 || low.indexOf('authentication key') >= 0
           || low.indexOf('not authenticated') >= 0 || low.indexOf('access denied') >= 0
@@ -81,28 +81,25 @@ async function scrape(c, df, dt, cp) {
       }
       if (!resp.ok) { lastErr = 'HTTP ' + resp.status + ': ' + trimmed.substring(0, 120); continue; }
 
-      if (!rawSample) rawSample = trimmed.substring(0, 300);
+      if (!rawSample) rawSample = trimmed.substring(0, 400);
 
-      // ── Format detect karo: XML / JSON / CSV ──
+      // ── Format detect: XML / JSON / delimited-text ──
       let parsedRows = [];
       if (trimmed.startsWith('<')) {
         format = 'xml';
         parsedRows = parseXmlRows(trimmed);
       } else if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-        // JSON try karo
         try {
           const data = JSON.parse(body);
           parsedRows = extractJsonRows(data);
           format = 'json';
         } catch (e) {
-          // JSON fail — CSV try karo
-          parsedRows = parseCsvRows(trimmed);
-          format = 'csv';
+          const res = parseDelimited(trimmed);
+          parsedRows = res.rows; format = 'delim(' + res.delim + ')';
         }
       } else {
-        // JSON/XML nahi hai — CSV/delimited hai (ye Betmen install CSV bhejta hai)
-        parsedRows = parseCsvRows(trimmed);
-        format = 'csv';
+        const res = parseDelimited(trimmed);
+        parsedRows = res.rows; format = 'delim(' + res.delim + ')';
       }
 
       const uh = Object.keys(style).find(k => k !== 'affiliateid') || 'query';
@@ -119,7 +116,9 @@ async function scrape(c, df, dt, cp) {
   }
 
   if (!allRows.length || !headerNames) {
-    throw new Error('Betmen: auth OK par ' + df + ' to ' + dt + ' me row parse nahi hui. Server ne bheja: "' + (rawSample || 'empty') + '"');
+    // Row parse nahi hui — EXACT bytes dikhao (tabs/newlines visible), taaki fix ho sake
+    const visible = escapeCtrl(rawSample);
+    throw new Error('Betmen: auth OK par row parse nahi hui. RAW (control chars visible): "' + visible + '"');
   }
 
   const keys = headerNames.slice();
@@ -139,48 +138,63 @@ async function scrape(c, df, dt, cp) {
   return { headers: headerLabels, rows };
 }
 
-// ---- CSV parser (Betmen ka main format) ----
-function parseCsvRows(text) {
+// ============================================================
+// SMART DELIMITED PARSER — auto-detects tab / comma / semicolon / pipe / multi-space
+// ============================================================
+function parseDelimited(text) {
   text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-  if (!text) return [];
+  if (!text) return { rows: [], delim: 'none' };
 
-  // Delimiter detect: comma, semicolon, ya tab
-  const firstLine = text.split('\n')[0];
-  let delim = ',';
-  if (firstLine.indexOf(';') >= 0 && firstLine.indexOf(',') < 0) delim = ';';
-  else if (firstLine.indexOf('\t') >= 0) delim = '\t';
+  const lines = text.split('\n').filter(l => l.trim().length);
+  if (lines.length < 1) return { rows: [], delim: 'none' };
 
-  // Quote-aware CSV parse
-  const records = [];
-  let field = '', row = [], inQ = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQ) {
-      if (ch === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
-      else field += ch;
-    } else {
-      if (ch === '"') inQ = true;
-      else if (ch === delim) { row.push(field); field = ''; }
-      else if (ch === '\n') { row.push(field); records.push(row); field = ''; row = []; }
-      else field += ch;
+  const header = lines[0];
+
+  // Delimiter detect — jo header me sabse zyada consistent lage
+  const candidates = [
+    { name: 'tab', re: /\t/, split: (s) => s.split('\t') },
+    { name: 'semicolon', re: /;/, split: (s) => s.split(';') },
+    { name: 'pipe', re: /\|/, split: (s) => s.split('|') },
+    { name: 'comma', re: /,/, split: (s) => s.split(',') },
+    { name: 'multispace', re: /\s{2,}/, split: (s) => s.split(/\s{2,}/) }
+  ];
+
+  let chosen = null;
+  for (const cand of candidates) {
+    if (cand.re.test(header)) {
+      const cols = cand.split(header).filter(x => x.trim().length);
+      if (cols.length >= 2) { chosen = cand; break; }
     }
   }
-  if (field.length || row.length) { row.push(field); records.push(row); }
 
-  if (records.length < 2) return []; // sirf header ya khaali
+  // Agar koi delimiter nahi mila — single column data
+  if (!chosen) {
+    // Har line ek value — generic "Value" column bana do
+    const rows = lines.slice(1).map(l => ({ Value: l.trim() })).filter(o => o.Value.length);
+    return { rows, delim: 'none/singlecol' };
+  }
 
-  const headers = records[0].map(h => h.trim());
+  const headerCols = chosen.split(header).map(h => h.trim());
   const rows = [];
-  for (let i = 1; i < records.length; i++) {
-    const r = records[i];
-    if (!r.some(c => c && c.trim().length)) continue; // khaali row skip
-    const first = String(r[0] || '').trim().toLowerCase();
-    if (first === 'total' || first === 'totals' || first === 'summary') continue; // total row skip
+  for (let i = 1; i < lines.length; i++) {
+    const cells = chosen.split(lines[i]);
+    if (!cells.some(c => c && c.trim().length)) continue;
+    const first = String(cells[0] || '').trim().toLowerCase();
+    if (first === 'total' || first === 'totals' || first === 'summary') continue;
     const obj = {};
-    headers.forEach((h, idx) => { obj[h || ('col' + idx)] = (r[idx] !== undefined ? r[idx] : ''); });
+    headerCols.forEach((h, idx) => { obj[h || ('col' + idx)] = (cells[idx] !== undefined ? String(cells[idx]).trim() : ''); });
     rows.push(obj);
   }
-  return rows;
+  return { rows, delim: chosen.name };
+}
+
+// Control chars ko visible banao ([9]=tab, [10]=newline) — debugging ke liye
+function escapeCtrl(s) {
+  return String(s).split('').map(ch => {
+    const code = ch.charCodeAt(0);
+    if (code < 32) return '[' + code + ']';
+    return ch;
+  }).join('');
 }
 
 // ---- JSON helper ----
