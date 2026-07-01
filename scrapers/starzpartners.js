@@ -15,7 +15,7 @@ async function scrape(c, df, dt, cp) {
   const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
-  const promoIds = String(c.promoIds || c.promo_ids || '').trim();
+  const campaignIds = String(c.campaignId || c.campaign_ids || '').trim();
 
   const spanDays = daysBetween(df, dt) + 1;
   const wantMonthly = spanDays > 45;
@@ -50,9 +50,12 @@ async function scrape(c, df, dt, cp) {
       + '&exchange_rates_date=' + encodeURIComponent(dt)
       + '&page=' + page;
 
-    // Promo filter — sirf is promo ka data
+    // Campaign filter — poore campaign ka data (UI jaisa)
+    if (campaignIds) {
+      url += '&campaign_ids=' + encodeURIComponent(campaignIds);
+    }
+    // Promo filter — sirf ek promo ka data
     if (promoIds) {
-      // promo_ids can be single or comma list
       url += '&promo_ids=' + encodeURIComponent(promoIds);
     }
 
