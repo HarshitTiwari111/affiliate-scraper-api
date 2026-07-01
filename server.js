@@ -29,7 +29,6 @@ app.get('/betmen-raw', async (q, r) => {
     const key = q.query.key || '';
     const affId = q.query.aff || '36451';
     const results = {};
-    // json=1 KE SAATH aur BINA — dono try karo
     for (const suffix of ['&json=1', '']) {
       const url = 'https://track.betmenaffiliates.com/api/'
         + '?command=mediareport&fromdate=2026-06-30&todate=2026-06-30&Day=1&Brand=1' + suffix;
@@ -45,6 +44,42 @@ app.get('/betmen-raw', async (q, r) => {
       };
     }
     r.json(results);
+  } catch (e) { r.json({ error: e.message }); }
+});
+
+// ============================================================
+// TEMPORARY DEBUG — Elite Casino CSV ka RAW structure dekhne ke liye
+// Browser me khol: /elite-raw?u=USERNAME&p=PASSWORD
+// ============================================================
+app.get('/elite-raw', async (q, r) => {
+  try {
+    const base = 'https://affiliates.elitecasinopartners.ag';
+    const clientId = q.query.u || '';
+    const clientSecret = q.query.p || '';
+    const df = q.query.df || '2026-06-30';
+    const dt = q.query.dt || '2026-06-30';
+
+    // Token
+    const tokenBody = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret, scope: 'r_user_stats' }).toString();
+    const tr = await fetch(base + '/oauth/access_token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }, body: tokenBody });
+    const tJson = JSON.parse(await tr.text());
+    const token = tJson.access_token;
+    if (!token) return r.json({ error: 'no token', resp: tJson });
+
+    // CSV
+    const statsUrl = base + '/statistics.php?d1=' + df + '&d2=' + dt + '&sd=1&mode=csv&sbm=1&dnl=1';
+    const sr = await fetch(statsUrl, { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'text/csv' } });
+    const csv = await sr.text();
+
+    // Har line ko number ke saath dikhao (taaki structure saaf dikhe)
+    const lines = csv.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const numbered = lines.slice(0, 40).map((l, i) => '[' + i + '] ' + l);
+
+    r.json({
+      totalLines: lines.length,
+      contentType: sr.headers.get('content-type'),
+      lines: numbered
+    });
   } catch (e) { r.json({ error: e.message }); }
 });
 
