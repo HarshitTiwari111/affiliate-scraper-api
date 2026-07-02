@@ -214,7 +214,7 @@ function filterRows(objs, wants) {
 
 // ── Traffic_report output (date-wise already aata hai) ──
 // ── Traffic_report output ──
-// <=62 din: date-wise rows | >62 din (This Year etc.): month-wise rows
+// <=62 din: date-wise | >62 din: month-wise (khali months 0 ke saath)
 function formatOutput(objs, df, dt) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
@@ -229,7 +229,6 @@ function formatOutput(objs, df, dt) {
   const dKey = findKey(['deposits_sum', 'deposit_sum', 'deposits_amount']);
   const nKey = findKey(['ngr']);
 
-  // Range >62 din → month-wise group karo
   let monthly = false;
   if (df && dt) {
     const totalDays = Math.round((new Date(dt + 'T00:00:00Z') - new Date(df + 'T00:00:00Z')) / 86400000) + 1;
@@ -242,7 +241,7 @@ function formatOutput(objs, df, dt) {
   const byDate = {};
   objs.forEach(o => {
     let d = dateKey ? String(o[dateKey]).substring(0, 10) : 'total';
-    if (monthly && /^\d{4}-\d{2}/.test(d)) d = d.substring(0, 7); // "2026-01"
+    if (monthly && /^\d{4}-\d{2}/.test(d)) d = d.substring(0, 7);
     if (!byDate[d]) byDate[d] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
     byDate[d].v += parseFloat(o[vKey]) || 0;
     byDate[d].r += parseFloat(o[rKey]) || 0;
@@ -251,9 +250,31 @@ function formatOutput(objs, df, dt) {
     byDate[d].n += parseFloat(o[nKey]) || 0;
   });
 
+  // ── Missing periods ko 0 ke saath fill karo ──
+  if (df && dt) {
+    if (monthly) {
+      // Har month df→dt range mein
+      let cur = new Date(Date.UTC(parseInt(df.substring(0, 4)), parseInt(df.substring(5, 7)) - 1, 1));
+      const endM = new Date(Date.UTC(parseInt(dt.substring(0, 4)), parseInt(dt.substring(5, 7)) - 1, 1));
+      while (cur <= endM) {
+        const key = cur.toISOString().substring(0, 7);
+        if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+        cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
+      }
+    } else {
+      // Har din df→dt range mein
+      let cur = new Date(df + 'T00:00:00Z');
+      const endD = new Date(dt + 'T00:00:00Z');
+      while (cur <= endD) {
+        const key = cur.toISOString().substring(0, 10);
+        if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+    }
+  }
+
   const rows = Object.keys(byDate).sort().map(d => {
     const x = byDate[d];
-    // Monthly label ko readable banao: "2026-01" → "Jan 2026"
     let label = d;
     if (monthly && /^\d{4}-\d{2}$/.test(d)) {
       label = MONTH_NAMES[parseInt(d.substring(5, 7), 10) - 1] + ' ' + d.substring(0, 4);
