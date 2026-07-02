@@ -48,7 +48,7 @@ async function scrape(c, df, dt, cp) {
     const result = await tryFetch(url, headers, 'traffic_report' + fv.substring(0, 30));
     if (result && result.objs.length) {
       console.log('  -> ROUTE 1 SUCCESS (traffic_report): ' + result.objs.length + ' rows');
-      return formatOutput(result.objs);
+      return formatOutput(result.objs, df, dt);
     }
     await sleep(2000);
   }
@@ -213,7 +213,9 @@ function filterRows(objs, wants) {
 }
 
 // ── Traffic_report output (date-wise already aata hai) ──
-function formatOutput(objs) {
+// ── Traffic_report output ──
+// <=62 din: date-wise rows | >62 din (This Year etc.): month-wise rows
+function formatOutput(objs, df, dt) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
     const lk = k.toLowerCase();
@@ -227,9 +229,20 @@ function formatOutput(objs) {
   const dKey = findKey(['deposits_sum', 'deposit_sum', 'deposits_amount']);
   const nKey = findKey(['ngr']);
 
+  // Range >62 din → month-wise group karo
+  let monthly = false;
+  if (df && dt) {
+    const totalDays = Math.round((new Date(dt + 'T00:00:00Z') - new Date(df + 'T00:00:00Z')) / 86400000) + 1;
+    monthly = totalDays > 62;
+  }
+  console.log('  -> formatOutput: ' + (monthly ? 'MONTHLY grouping' : 'daily rows'));
+
+  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
   const byDate = {};
   objs.forEach(o => {
-    const d = dateKey ? String(o[dateKey]).substring(0, 10) : 'total';
+    let d = dateKey ? String(o[dateKey]).substring(0, 10) : 'total';
+    if (monthly && /^\d{4}-\d{2}/.test(d)) d = d.substring(0, 7); // "2026-01"
     if (!byDate[d]) byDate[d] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
     byDate[d].v += parseFloat(o[vKey]) || 0;
     byDate[d].r += parseFloat(o[rKey]) || 0;
@@ -240,12 +253,17 @@ function formatOutput(objs) {
 
   const rows = Object.keys(byDate).sort().map(d => {
     const x = byDate[d];
-    return [d, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
+    // Monthly label ko readable banao: "2026-01" → "Jan 2026"
+    let label = d;
+    if (monthly && /^\d{4}-\d{2}$/.test(d)) {
+      label = MONTH_NAMES[parseInt(d.substring(5, 7), 10) - 1] + ' ' + d.substring(0, 4);
+    }
+    return [label, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
   });
 
-  return { headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
+  const dateHeader = monthly ? 'Month' : 'Date';
+  return { headers: [dateHeader, 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
 }
-
 // ── Chunk list: <=62 din → per day | >62 din → per month ──
 function buildChunkList(df, dt) {
   const start = new Date(df + 'T00:00:00Z');
