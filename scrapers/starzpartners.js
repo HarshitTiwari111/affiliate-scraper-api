@@ -1,7 +1,6 @@
 // ============================================================
-// STARZPARTNERS — Partner REPORT API (self-diagnosing version)
+// STARZPARTNERS — Partner REPORT API (v3 — range-based detection)
 // Col H: baseUrl:...,promoIds:30482,columns:Date.Visits.Registrations.First Deposits
-// promoIds mein ID ya promo naam (b975e1edd) dono chalega
 // ============================================================
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -11,7 +10,6 @@ const COLUMNS = JSON.stringify([
   'deposits_sum', 'average_deposit_amount', 'ngr'
 ]);
 
-// group_by mein promo ke liye alag-alag naam try karo
 const PROMO_TOKENS = ['promo', 'promos', 'promo_id'];
 
 async function scrape(c, df, dt, cp) {
@@ -19,7 +17,6 @@ async function scrape(c, df, dt, cp) {
   const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
-  // ID ya naam — dono lowercase mein match karenge
   const wants = String(c.promoIds || c.promo_ids || c.campaignId || c.campaign_ids || '')
     .trim().split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
@@ -32,63 +29,64 @@ async function scrape(c, df, dt, cp) {
   const days = buildDayList(df, dt);
   if (days.length > 62) throw new Error('StarzPartners: range too big (' + days.length + ' days).');
 
-  // ── Pehle working group_by dhundo (pehle din pe test) ──
+  // ── Working group_by dhundo — POORE RANGE pe test (single day pe nahi!) ──
   let workingGroupBy = null;
-  let firstDayObjs = null;
+  let rangeObjs = null;
   const diag = [];
 
   for (const pt of PROMO_TOKENS) {
     const gb = ['brand', 'campaign', pt];
     try {
-      const rows = await fetchReport(base, headers, gb, days[0], days[0]);
-      diag.push(pt + '=' + rows.length + ' rows');
-      if (rows.length) { workingGroupBy = gb; firstDayObjs = rowsToObjects(rows); break; }
-    } catch (e) { diag.push(pt + '=ERR ' + e.message.substring(0, 60)); }
-    await sleep(900);
+      const rows = await fetchReport(base, headers, gb, df, dt);
+      diag.push(pt + '=' + rows.length);
+      if (rows.length) { workingGroupBy = gb; rangeObjs = rowsToObjects(rows); break; }
+    } catch (e) { diag.push(pt + '=ERR:' + e.message.substring(0, 50)); }
+    await sleep(2000);
   }
 
-  // Promo grouping bilkul nahi chala → bina promo ke (brand+campaign)
   if (!workingGroupBy) {
+    // Promo grouping se kuch nahi mila — check karo range mein data hai bhi?
+    let baseRows = [];
     try {
-      const rows = await fetchReport(base, headers, ['brand', 'campaign'], days[0], days[0]);
-      diag.push('brand+campaign=' + rows.length + ' rows');
-      if (rows.length) { workingGroupBy = ['brand', 'campaign']; firstDayObjs = rowsToObjects(rows); }
+      baseRows = await fetchReport(base, headers, ['brand', 'campaign'], df, dt);
+      diag.push('brand+campaign=' + baseRows.length);
     } catch (e) { diag.push('brand+campaign=ERR'); }
+
+    if (!baseRows.length) {
+      // Poore range mein account-level data hi nahi — ye error nahi, empty period hai
+      console.log('  -> StarzPartners: is range mein account mein koi data nahi (' + df + ' → ' + dt + ')');
+      return {
+        headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
+        rows: days.map(d => [d, '0', '0', '0', '0.00', '0.00'])
+      };
+    }
+
+    // Data hai lekin promo grouping fail — brand+campaign se hi chalao (promo filter possible nahi)
+    console.log('  -> StarzPartners: promo grouping unsupported, brand+campaign use kar raha (NO promo filter!)');
+    workingGroupBy = ['brand', 'campaign'];
   }
 
-  if (!workingGroupBy) {
-    throw new Error('StarzPartners: API se koi rows hi nahi aa rahi (' + days[0] + '). Tried: ' + diag.join(' | ') + '. Token expire toh nahi hua?');
-  }
-
-  console.log('  -> StarzPartners group_by working: ' + JSON.stringify(workingGroupBy));
+  console.log('  -> StarzPartners group_by: ' + JSON.stringify(workingGroupBy) + ' | ' + diag.join(' | '));
 
   // ── Day-by-day loop ──
   const outRows = [];
   let matchedAny = false;
-  const seenPromoValues = {};
+  const seenValues = {};
 
-  for (let di = 0; di < days.length; di++) {
-    const day = days[di];
-    let objs;
-    if (di === 0 && firstDayObjs) {
-      objs = firstDayObjs; // pehle din ka data already fetch ho chuka
-    } else {
-      try {
-        const rows = await fetchReport(base, headers, workingGroupBy, day, day);
-        objs = rowsToObjects(rows);
-      } catch (e) {
-        console.log('  -> ' + day + ' failed: ' + e.message.substring(0, 80));
-        objs = [];
-      }
-      await sleep(700);
+  for (const day of days) {
+    let objs = [];
+    try {
+      const rows = await fetchReport(base, headers, workingGroupBy, day, day);
+      objs = rowsToObjects(rows);
+    } catch (e) {
+      console.log('  -> ' + day + ' failed: ' + e.message.substring(0, 80));
     }
 
-    // Diagnostic: promo values collect karo
     objs.forEach(o => {
       Object.keys(o).forEach(k => {
         const lk = k.toLowerCase();
         if (lk.indexOf('promo') >= 0 || lk === 'campaign' || lk === 'brand') {
-          seenPromoValues[k + ': ' + String(o[k]).substring(0, 50)] = true;
+          seenValues[k + ': ' + String(o[k]).substring(0, 50)] = true;
         }
       });
     });
@@ -105,14 +103,20 @@ async function scrape(c, df, dt, cp) {
       sum('deposits_sum').toFixed(2),
       sum('ngr').toFixed(2)
     ]);
+
+    await sleep(1500);
   }
 
-  if (wants.length && !matchedAny) {
-    const seen = Object.keys(seenPromoValues).slice(0, 12);
-    throw new Error('StarzPartners: "' + wants.join(',') + '" kisi row mein nahi mila (' + df + ' → ' + dt + ').\n\nAPI ne ye values bheji:\n' + (seen.length ? seen.join('\n') : '(koi rows nahi)') + '\n\nIn mein se sahi value promoIds mein daal.');
+  // Range mein data tha, promo bhi group ho raha tha, par tera ID match nahi hua → diagnostic
+  if (wants.length && !matchedAny && rangeObjs) {
+    const rangeMatched = filterRows(rangeObjs, wants);
+    if (!rangeMatched.length) {
+      const seen = Object.keys(seenValues).slice(0, 12);
+      throw new Error('StarzPartners: "' + wants.join(',') + '" kisi row mein nahi mila.\n\nAPI ne ye values bheji:\n' + seen.join('\n') + '\n\nIn mein se sahi value promoIds mein daal.');
+    }
   }
 
-  console.log('  -> StarzPartners: ' + outRows.length + ' day rows');
+  console.log('  -> StarzPartners: ' + outRows.length + ' day rows done');
   return {
     headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
     rows: outRows
@@ -138,8 +142,8 @@ async function fetchReport(base, headers, groupBy, from, to) {
     resp = await fetch(url, { method: 'GET', headers });
     body = await resp.text();
     if (resp.status !== 429) break;
-    console.log('  -> 429, waiting 4s...');
-    await sleep(4000);
+    console.log('  -> 429, waiting 5s...');
+    await sleep(5000);
   }
   if (!resp.ok) throw new Error(resp.status + ': ' + body.substring(0, 120));
 
@@ -155,7 +159,6 @@ function rowsToObjects(dataRows) {
   });
 }
 
-// Row ki HAR value mein ID/naam dhundo (case-insensitive)
 function filterRows(objs, wants) {
   if (!wants.length) return objs;
   return objs.filter(o => {
