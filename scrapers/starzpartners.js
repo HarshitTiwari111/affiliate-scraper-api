@@ -1,8 +1,8 @@
 // ============================================================
-// STARZPARTNERS — FINAL (v4)
-// Route 1: /partner/traffic_report  (promo_id + date_group_by=day — direct support)
-// Route 2: /partner/report          (group_by token auto-discovery)
-// Route 3: day-by-day loop          (client-side promo filter)
+// STARZPARTNERS — FINAL (v5)
+// Route 1: /partner/traffic_report  (koi bhi range, ek request)
+// Route 2: /partner/report          (group_by token discovery)
+// Route 3: chunk loop — <=62 din: day-by-day | >62 din: month-by-month
 // Col H: baseUrl:https://starzpartners.com,promoIds:30482,columns:Date.Visits.Registrations.First Deposits
 // ============================================================
 
@@ -27,11 +27,8 @@ async function scrape(c, df, dt, cp) {
     'User-Agent': 'Mozilla/5.0'
   };
 
-  const days = buildDayList(df, dt);
-  if (days.length > 62) throw new Error('StarzPartners: range too big (' + days.length + ' days).');
-
   // ════════════════════════════════════════════
-  // ROUTE 1 — TRAFFIC_REPORT (promo_id direct support)
+  // ROUTE 1 — TRAFFIC_REPORT (koi bhi range, single request)
   // ════════════════════════════════════════════
   const trafficVariants = [];
   if (wants.length) {
@@ -51,53 +48,52 @@ async function scrape(c, df, dt, cp) {
     const result = await tryFetch(url, headers, 'traffic_report' + fv.substring(0, 30));
     if (result && result.objs.length) {
       console.log('  -> ROUTE 1 SUCCESS (traffic_report): ' + result.objs.length + ' rows');
-      return formatOutput(result.objs, days);
+      return formatOutput(result.objs);
     }
     await sleep(2000);
   }
   console.log('  -> Route 1 (traffic_report) se kuch nahi mila, Route 2...');
 
+  // ── Chunk list banao (Route 2/3 fallback ke liye) ──
+  // <=62 din: har din alag | >62 din: month-by-month (This Year jaise ranges ke liye)
+  const chunks = buildChunkList(df, dt);
+  console.log('  -> Fallback chunks: ' + chunks.length + ' (' + chunks[0].label + ' ... ' + chunks[chunks.length - 1].label + ')');
+
   // ════════════════════════════════════════════
   // ROUTE 2 — REPORT endpoint, group_by token discovery (poore range pe)
   // ════════════════════════════════════════════
   const promoTokens = ['promo', 'promos', 'promo_id', 'promo_code', 'promo_hash'];
-  let discoveredObjs = null;
 
   for (const pt of promoTokens) {
     const url = buildReportUrl(base, ['brand', 'campaign', pt], df, dt);
     const result = await tryFetch(url, headers, 'report group_by=' + pt);
     if (result && result.objs.length) {
       console.log('  -> ROUTE 2 SUCCESS: group_by token "' + pt + '" works! ' + result.objs.length + ' rows');
-      discoveredObjs = result.objs;
-      // Range-level data mila with promo — ab day-by-day loop se date-wise banao
-      return await dayByDayLoop(base, headers, ['brand', 'campaign', pt], days, wants, discoveredObjs, df, dt);
+      return await chunkLoop(base, headers, ['brand', 'campaign', pt], chunks, wants, result.objs, df, dt);
     }
     await sleep(2000);
   }
   console.log('  -> Route 2 (promo group_by) se kuch nahi mila, Route 3...');
 
   // ════════════════════════════════════════════
-  // ROUTE 3 — brand+campaign day-by-day (last resort)
-  // Pehle check: range mein data hai bhi?
+  // ROUTE 3 — brand+campaign chunk loop (last resort)
   // ════════════════════════════════════════════
   const baseUrl2 = buildReportUrl(base, ['brand', 'campaign'], df, dt);
   const baseResult = await tryFetch(baseUrl2, headers, 'report brand+campaign');
 
   if (!baseResult || !baseResult.objs.length) {
-    // Account-level bhi khali — sach mein data nahi hai is range mein
     console.log('  -> Account mein is range mein KOI data nahi (' + df + ' → ' + dt + ')');
     return {
       headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
-      rows: days.map(d => [d, '0', '0', '0', '0.00', '0.00'])
+      rows: chunks.map(ch => [ch.label, '0', '0', '0', '0.00', '0.00'])
     };
   }
 
-  // Data hai, lekin promo-level access kisi route se nahi mila
   if (wants.length) {
-    throw new Error('StarzPartners: account mein data HAI (' + baseResult.objs.length + ' rows) lekin promo-level breakdown kisi bhi API route se nahi mil raha — traffic_report aur saare group_by tokens fail. Render logs mein "preview" lines dekh aur mujhe bhej — usme API ka exact response structure hai.');
+    throw new Error('StarzPartners: account mein data HAI (' + baseResult.objs.length + ' rows) lekin promo-level breakdown kisi bhi API route se nahi mil raha — Render logs mein "preview" lines dekh aur mujhe bhej.');
   }
 
-  return await dayByDayLoop(base, headers, ['brand', 'campaign'], days, [], null, df, dt);
+  return await chunkLoop(base, headers, ['brand', 'campaign'], chunks, [], null, df, dt);
 }
 
 // ── Fetch + flexible parse + LOG PREVIEW ──
@@ -123,7 +119,6 @@ async function tryFetch(url, headers, label) {
   let data;
   try { data = JSON.parse(body); } catch (e) { return null; }
 
-  // Flexible: alag-alag response shapes handle karo
   let raw = null;
   if (data.rows && Array.isArray(data.rows.data)) raw = data.rows.data;
   else if (Array.isArray(data.rows)) raw = data.rows;
@@ -131,7 +126,6 @@ async function tryFetch(url, headers, label) {
   else if (Array.isArray(data)) raw = data;
   if (!raw || !raw.length) return { objs: [] };
 
-  // Cells format: [{name,value},...] ya direct object — dono chalega
   const objs = raw.map(item => {
     if (Array.isArray(item)) {
       const o = {};
@@ -159,16 +153,17 @@ function buildReportUrl(base, groupBy, from, to) {
     + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
 }
 
-// ── Day-by-day loop with client-side promo filter ──
-async function dayByDayLoop(base, headers, groupBy, days, wants, rangeObjs, df, dt) {
+// ── Chunk loop with client-side promo filter ──
+// chunk = { from, to, label } — chhota range: per-day | bada range: per-month
+async function chunkLoop(base, headers, groupBy, chunks, wants, rangeObjs, df, dt) {
   const outRows = [];
   let matchedAny = false;
   const seenValues = {};
 
-  for (const day of days) {
+  for (const ch of chunks) {
     let objs = [];
-    const url = buildReportUrl(base, groupBy, day, day);
-    const result = await tryFetch(url, headers, 'day ' + day);
+    const url = buildReportUrl(base, groupBy, ch.from, ch.to);
+    const result = await tryFetch(url, headers, 'chunk ' + ch.label);
     if (result) objs = result.objs;
 
     objs.forEach(o => {
@@ -185,7 +180,7 @@ async function dayByDayLoop(base, headers, groupBy, days, wants, rangeObjs, df, 
 
     const sum = (key) => matched.reduce((a, o) => a + (parseFloat(o[key]) || 0), 0);
     outRows.push([
-      day,
+      ch.label,
       String(sum('visits_count')),
       String(sum('registrations_count')),
       String(sum('first_deposits_count')),
@@ -201,7 +196,7 @@ async function dayByDayLoop(base, headers, groupBy, days, wants, rangeObjs, df, 
     throw new Error('StarzPartners: "' + wants.join(',') + '" kisi row mein match nahi hua (' + df + ' → ' + dt + ').\n\nAPI ne ye values bheji:\n' + (seen.length ? seen.join('\n') : '(rows khali)') + '\n\nIn mein se sahi value promoIds mein daal.');
   }
 
-  console.log('  -> day-by-day done: ' + outRows.length + ' rows');
+  console.log('  -> chunk loop done: ' + outRows.length + ' rows');
   return {
     headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
     rows: outRows
@@ -218,15 +213,13 @@ function filterRows(objs, wants) {
 }
 
 // ── Traffic_report output (date-wise already aata hai) ──
-function formatOutput(objs, days) {
-  // Date key dhundo
+function formatOutput(objs) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
     const lk = k.toLowerCase();
     return lk === 'date' || lk === 'day' || lk === 'period' || /^\d{4}-\d{2}-\d{2}/.test(String(objs[0][k] || ''));
   });
 
-  // Metric keys — flexible naam matching
   const findKey = (patterns) => keys.find(k => patterns.some(p => k.toLowerCase().indexOf(p) >= 0));
   const vKey = findKey(['visit']);
   const rKey = findKey(['registration', 'signup']);
@@ -253,15 +246,33 @@ function formatOutput(objs, days) {
   return { headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
 }
 
-function buildDayList(df, dt) {
-  const days = [];
-  let d = new Date(df + 'T00:00:00Z');
+// ── Chunk list: <=62 din → per day | >62 din → per month ──
+function buildChunkList(df, dt) {
+  const start = new Date(df + 'T00:00:00Z');
   const end = new Date(dt + 'T00:00:00Z');
-  while (d <= end) {
-    days.push(d.toISOString().substring(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
+  const totalDays = Math.round((end - start) / 86400000) + 1;
+  const chunks = [];
+
+  if (totalDays <= 62) {
+    let d = new Date(start);
+    while (d <= end) {
+      const iso = d.toISOString().substring(0, 10);
+      chunks.push({ from: iso, to: iso, label: iso });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+  } else {
+    // Month-by-month (This Year / lambi ranges)
+    let cur = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+    while (cur <= end) {
+      const monthEnd = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0));
+      const chunkEnd = monthEnd > end ? end : monthEnd;
+      const fromIso = cur.toISOString().substring(0, 10);
+      const toIso = chunkEnd.toISOString().substring(0, 10);
+      chunks.push({ from: fromIso, to: toIso, label: fromIso.substring(0, 7) }); // "2026-01"
+      cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
+    }
   }
-  return days;
+  return chunks;
 }
 
 module.exports = { scrape };
