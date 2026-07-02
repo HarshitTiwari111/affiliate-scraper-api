@@ -1,9 +1,10 @@
 // ============================================================
-// STARZPARTNERS — FINAL (v5)
-// Route 1: /partner/traffic_report  (koi bhi range, ek request)
-// Route 2: /partner/report          (group_by token discovery)
-// Route 3: chunk loop — <=62 din: day-by-day | >62 din: month-by-month
-// Col H: baseUrl:https://starzpartners.com,promoIds:30482,columns:Date.Visits.Registrations.First Deposits
+// STARZPARTNERS — FINAL (v6)
+// Route 1: /partner/traffic_report
+//   <=62 din: single request, daily rows
+//   >62 din:  PER-MONTH requests (API ~120 row cap se bachne ke liye), monthly rows
+// Route 2: /partner/report (group_by discovery) | Route 3: chunk loop
+// Col H: baseUrl:https://starzpartners.com,promoIds:30482,columns:Date.Month.Visits.Registrations.First Deposits
 // ============================================================
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -12,6 +13,8 @@ const REPORT_COLUMNS = JSON.stringify([
   'visits_count', 'registrations_count', 'first_deposits_count',
   'deposits_sum', 'average_deposit_amount', 'ngr'
 ]);
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://starzpartners.com').replace(/\/+$/, '');
@@ -27,9 +30,10 @@ async function scrape(c, df, dt, cp) {
     'User-Agent': 'Mozilla/5.0'
   };
 
-  // ════════════════════════════════════════════
-  // ROUTE 1 — TRAFFIC_REPORT (koi bhi range, single request)
-  // ════════════════════════════════════════════
+  const totalDays = Math.round((new Date(dt + 'T00:00:00Z') - new Date(df + 'T00:00:00Z')) / 86400000) + 1;
+  const monthly = totalDays > 62;
+
+  // Promo filter variants (jo pehla month pe chale, wahi aage use hoga)
   const trafficVariants = [];
   if (wants.length) {
     trafficVariants.push('&promo_id=' + encodeURIComponent(wants[0]));
@@ -39,28 +43,65 @@ async function scrape(c, df, dt, cp) {
     trafficVariants.push('');
   }
 
-  for (const fv of trafficVariants) {
-    const url = base + '/api/customer/v1/partner/traffic_report'
-      + '?from=' + encodeURIComponent(df)
-      + '&to=' + encodeURIComponent(dt)
-      + '&date_group_by=day'
-      + fv;
-    const result = await tryFetch(url, headers, 'traffic_report' + fv.substring(0, 30));
-    if (result && result.objs.length) {
-      console.log('  -> ROUTE 1 SUCCESS (traffic_report): ' + result.objs.length + ' rows');
-      return formatOutput(result.objs, df, dt);
+  // ════════════════════════════════════════════
+  // ROUTE 1 — TRAFFIC_REPORT
+  // ════════════════════════════════════════════
+  if (!monthly) {
+    // ── Chhota range: single request, daily rows ──
+    for (const fv of trafficVariants) {
+      const result = await fetchTraffic(base, headers, df, dt, fv);
+      if (result && result.objs.length) {
+        console.log('  -> ROUTE 1 SUCCESS (daily): ' + result.objs.length + ' rows');
+        return formatDaily(result.objs, df, dt);
+      }
+      await sleep(2000);
     }
-    await sleep(2000);
+  } else {
+    // ── Lamba range: HAR MONTH alag request (API row-cap bypass) ──
+    const monthChunks = buildMonthChunks(df, dt);
+    console.log('  -> ROUTE 1 monthly mode: ' + monthChunks.length + ' month requests');
+
+    // Working promo variant dhundo — months pe try karo jab tak kisi mein rows na milein
+    let workingFv = null;
+    let prefetched = {}; // label -> objs (dobara fetch na karna pade)
+
+    outer:
+    for (const fv of trafficVariants) {
+      for (const ch of monthChunks) {
+        const result = await fetchTraffic(base, headers, ch.from, ch.to, fv);
+        await sleep(1200);
+        if (result && result.objs.length) {
+          workingFv = fv;
+          prefetched[ch.label] = result.objs;
+          console.log('  -> working promo variant mila (month ' + ch.label + ')');
+          break outer;
+        }
+      }
+    }
+
+    if (workingFv !== null) {
+      const rows = [];
+      for (const ch of monthChunks) {
+        let objs = prefetched[ch.label];
+        if (!objs) {
+          const result = await fetchTraffic(base, headers, ch.from, ch.to, workingFv);
+          objs = (result && result.objs) ? result.objs : [];
+          await sleep(1200);
+        }
+        const t = sumObjs(objs);
+        rows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
+        console.log('  -> ' + ch.label + ': visits=' + t.v + ' regs=' + t.r + ' ftd=' + t.f);
+      }
+      return { headers: ['Month', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
+    }
   }
   console.log('  -> Route 1 (traffic_report) se kuch nahi mila, Route 2...');
 
-  // ── Chunk list banao (Route 2/3 fallback ke liye) ──
-  // <=62 din: har din alag | >62 din: month-by-month (This Year jaise ranges ke liye)
+  // ── Fallback chunks ──
   const chunks = buildChunkList(df, dt);
-  console.log('  -> Fallback chunks: ' + chunks.length + ' (' + chunks[0].label + ' ... ' + chunks[chunks.length - 1].label + ')');
 
   // ════════════════════════════════════════════
-  // ROUTE 2 — REPORT endpoint, group_by token discovery (poore range pe)
+  // ROUTE 2 — REPORT endpoint, group_by token discovery
   // ════════════════════════════════════════════
   const promoTokens = ['promo', 'promos', 'promo_id', 'promo_code', 'promo_hash'];
 
@@ -68,32 +109,60 @@ async function scrape(c, df, dt, cp) {
     const url = buildReportUrl(base, ['brand', 'campaign', pt], df, dt);
     const result = await tryFetch(url, headers, 'report group_by=' + pt);
     if (result && result.objs.length) {
-      console.log('  -> ROUTE 2 SUCCESS: group_by token "' + pt + '" works! ' + result.objs.length + ' rows');
-      return await chunkLoop(base, headers, ['brand', 'campaign', pt], chunks, wants, result.objs, df, dt);
+      console.log('  -> ROUTE 2 SUCCESS: group_by "' + pt + '" works!');
+      return await chunkLoop(base, headers, ['brand', 'campaign', pt], chunks, wants, df, dt);
     }
     await sleep(2000);
   }
-  console.log('  -> Route 2 (promo group_by) se kuch nahi mila, Route 3...');
+  console.log('  -> Route 2 se kuch nahi mila, Route 3...');
 
   // ════════════════════════════════════════════
-  // ROUTE 3 — brand+campaign chunk loop (last resort)
+  // ROUTE 3 — brand+campaign chunk loop
   // ════════════════════════════════════════════
-  const baseUrl2 = buildReportUrl(base, ['brand', 'campaign'], df, dt);
-  const baseResult = await tryFetch(baseUrl2, headers, 'report brand+campaign');
+  const baseResult = await tryFetch(buildReportUrl(base, ['brand', 'campaign'], df, dt), headers, 'report brand+campaign');
 
   if (!baseResult || !baseResult.objs.length) {
-    console.log('  -> Account mein is range mein KOI data nahi (' + df + ' → ' + dt + ')');
+    console.log('  -> Account mein is range mein KOI data nahi');
     return {
-      headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
+      headers: [monthly ? 'Month' : 'Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
       rows: chunks.map(ch => [ch.label, '0', '0', '0', '0.00', '0.00'])
     };
   }
 
   if (wants.length) {
-    throw new Error('StarzPartners: account mein data HAI (' + baseResult.objs.length + ' rows) lekin promo-level breakdown kisi bhi API route se nahi mil raha — Render logs mein "preview" lines dekh aur mujhe bhej.');
+    throw new Error('StarzPartners: account mein data HAI lekin promo-level breakdown kisi route se nahi mila — Render logs bhej.');
   }
 
-  return await chunkLoop(base, headers, ['brand', 'campaign'], chunks, [], null, df, dt);
+  return await chunkLoop(base, headers, ['brand', 'campaign'], chunks, [], df, dt);
+}
+
+// ── Traffic_report single request ──
+async function fetchTraffic(base, headers, from, to, fv) {
+  const url = base + '/api/customer/v1/partner/traffic_report'
+    + '?from=' + encodeURIComponent(from)
+    + '&to=' + encodeURIComponent(to)
+    + '&date_group_by=day'
+    + fv;
+  return await tryFetch(url, headers, 'traffic ' + from + '→' + to);
+}
+
+// ── Objs ka total ──
+function sumObjs(objs) {
+  const t = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+  if (!objs.length) return t;
+  const keys = Object.keys(objs[0]);
+  const findKey = (pats) => keys.find(k => pats.some(p => k.toLowerCase().indexOf(p) >= 0));
+  const vKey = findKey(['visit']), rKey = findKey(['registration', 'signup']),
+    fKey = findKey(['first_deposit', 'ftd']), dKey = findKey(['deposits_sum', 'deposit_sum']),
+    nKey = findKey(['ngr']);
+  objs.forEach(o => {
+    t.v += parseFloat(o[vKey]) || 0;
+    t.r += parseFloat(o[rKey]) || 0;
+    t.f += parseFloat(o[fKey]) || 0;
+    t.dep += parseFloat(o[dKey]) || 0;
+    t.n += parseFloat(o[nKey]) || 0;
+  });
+  return t;
 }
 
 // ── Fetch + flexible parse + LOG PREVIEW ──
@@ -112,8 +181,7 @@ async function tryFetch(url, headers, label) {
     return null;
   }
 
-  console.log('  -> [' + label + '] status=' + resp.status + ' preview=' + body.substring(0, 200).replace(/\s+/g, ' '));
-
+  console.log('  -> [' + label + '] status=' + resp.status + ' preview=' + body.substring(0, 150).replace(/\s+/g, ' '));
   if (!resp.ok) return null;
 
   let data;
@@ -153,17 +221,15 @@ function buildReportUrl(base, groupBy, from, to) {
     + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
 }
 
-// ── Chunk loop with client-side promo filter ──
-// chunk = { from, to, label } — chhota range: per-day | bada range: per-month
-async function chunkLoop(base, headers, groupBy, chunks, wants, rangeObjs, df, dt) {
+// ── Chunk loop (Route 2/3 fallback) with client-side promo filter ──
+async function chunkLoop(base, headers, groupBy, chunks, wants, df, dt) {
   const outRows = [];
   let matchedAny = false;
   const seenValues = {};
 
   for (const ch of chunks) {
     let objs = [];
-    const url = buildReportUrl(base, groupBy, ch.from, ch.to);
-    const result = await tryFetch(url, headers, 'chunk ' + ch.label);
+    const result = await tryFetch(buildReportUrl(base, groupBy, ch.from, ch.to), headers, 'chunk ' + ch.label);
     if (result) objs = result.objs;
 
     objs.forEach(o => {
@@ -178,27 +244,19 @@ async function chunkLoop(base, headers, groupBy, chunks, wants, rangeObjs, df, d
     const matched = filterRows(objs, wants);
     if (matched.length) matchedAny = true;
 
-    const sum = (key) => matched.reduce((a, o) => a + (parseFloat(o[key]) || 0), 0);
-    outRows.push([
-      ch.label,
-      String(sum('visits_count')),
-      String(sum('registrations_count')),
-      String(sum('first_deposits_count')),
-      sum('deposits_sum').toFixed(2),
-      sum('ngr').toFixed(2)
-    ]);
-
+    const t = sumObjs(matched);
+    outRows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
     await sleep(1500);
   }
 
   if (wants.length && !matchedAny) {
     const seen = Object.keys(seenValues).slice(0, 15);
-    throw new Error('StarzPartners: "' + wants.join(',') + '" kisi row mein match nahi hua (' + df + ' → ' + dt + ').\n\nAPI ne ye values bheji:\n' + (seen.length ? seen.join('\n') : '(rows khali)') + '\n\nIn mein se sahi value promoIds mein daal.');
+    throw new Error('StarzPartners: "' + wants.join(',') + '" match nahi hua.\nAPI values:\n' + (seen.length ? seen.join('\n') : '(khali)'));
   }
 
-  console.log('  -> chunk loop done: ' + outRows.length + ' rows');
+  const isMonthly = chunks.length > 0 && chunks[0].from !== chunks[0].to;
   return {
-    headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
+    headers: [isMonthly ? 'Month' : 'Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
     rows: outRows
   };
 }
@@ -212,36 +270,21 @@ function filterRows(objs, wants) {
   });
 }
 
-// ── Traffic_report output (date-wise already aata hai) ──
-// ── Traffic_report output ──
-// <=62 din: date-wise | >62 din: month-wise (khali months 0 ke saath)
-function formatOutput(objs, df, dt) {
+// ── Daily output (chhote ranges), missing din 0 se fill ──
+function formatDaily(objs, df, dt) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
     const lk = k.toLowerCase();
     return lk === 'date' || lk === 'day' || lk === 'period' || /^\d{4}-\d{2}-\d{2}/.test(String(objs[0][k] || ''));
   });
-
-  const findKey = (patterns) => keys.find(k => patterns.some(p => k.toLowerCase().indexOf(p) >= 0));
-  const vKey = findKey(['visit']);
-  const rKey = findKey(['registration', 'signup']);
-  const fKey = findKey(['first_deposit', 'ftd']);
-  const dKey = findKey(['deposits_sum', 'deposit_sum', 'deposits_amount']);
-  const nKey = findKey(['ngr']);
-
-  let monthly = false;
-  if (df && dt) {
-    const totalDays = Math.round((new Date(dt + 'T00:00:00Z') - new Date(df + 'T00:00:00Z')) / 86400000) + 1;
-    monthly = totalDays > 62;
-  }
-  console.log('  -> formatOutput: ' + (monthly ? 'MONTHLY grouping' : 'daily rows'));
-
-  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const findKey = (pats) => keys.find(k => pats.some(p => k.toLowerCase().indexOf(p) >= 0));
+  const vKey = findKey(['visit']), rKey = findKey(['registration', 'signup']),
+    fKey = findKey(['first_deposit', 'ftd']), dKey = findKey(['deposits_sum', 'deposit_sum']),
+    nKey = findKey(['ngr']);
 
   const byDate = {};
   objs.forEach(o => {
-    let d = dateKey ? String(o[dateKey]).substring(0, 10) : 'total';
-    if (monthly && /^\d{4}-\d{2}/.test(d)) d = d.substring(0, 7);
+    const d = dateKey ? String(o[dateKey]).substring(0, 10) : 'total';
     if (!byDate[d]) byDate[d] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
     byDate[d].v += parseFloat(o[vKey]) || 0;
     byDate[d].r += parseFloat(o[rKey]) || 0;
@@ -250,68 +293,57 @@ function formatOutput(objs, df, dt) {
     byDate[d].n += parseFloat(o[nKey]) || 0;
   });
 
-  // ── Missing periods ko 0 ke saath fill karo ──
-  if (df && dt) {
-    if (monthly) {
-      // Har month df→dt range mein
-      let cur = new Date(Date.UTC(parseInt(df.substring(0, 4)), parseInt(df.substring(5, 7)) - 1, 1));
-      const endM = new Date(Date.UTC(parseInt(dt.substring(0, 4)), parseInt(dt.substring(5, 7)) - 1, 1));
-      while (cur <= endM) {
-        const key = cur.toISOString().substring(0, 7);
-        if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
-        cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
-      }
-    } else {
-      // Har din df→dt range mein
-      let cur = new Date(df + 'T00:00:00Z');
-      const endD = new Date(dt + 'T00:00:00Z');
-      while (cur <= endD) {
-        const key = cur.toISOString().substring(0, 10);
-        if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
-        cur.setUTCDate(cur.getUTCDate() + 1);
-      }
-    }
+  // Missing din 0 se fill
+  let cur = new Date(df + 'T00:00:00Z');
+  const endD = new Date(dt + 'T00:00:00Z');
+  while (cur <= endD) {
+    const key = cur.toISOString().substring(0, 10);
+    if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+    cur.setUTCDate(cur.getUTCDate() + 1);
   }
 
   const rows = Object.keys(byDate).sort().map(d => {
     const x = byDate[d];
-    let label = d;
-    if (monthly && /^\d{4}-\d{2}$/.test(d)) {
-      label = MONTH_NAMES[parseInt(d.substring(5, 7), 10) - 1] + ' ' + d.substring(0, 4);
-    }
-    return [label, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
+    return [d, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
   });
-
-  const dateHeader = monthly ? 'Month' : 'Date';
-  return { headers: [dateHeader, 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
+  return { headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
 }
-// ── Chunk list: <=62 din → per day | >62 din → per month ──
+
+// ── Month chunks: har month ka from/to + "Jan 2026" label ──
+function buildMonthChunks(df, dt) {
+  const start = new Date(df + 'T00:00:00Z');
+  const end = new Date(dt + 'T00:00:00Z');
+  const chunks = [];
+  let cur = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  while (cur <= end) {
+    const monthEnd = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0));
+    const chunkEnd = monthEnd > end ? end : monthEnd;
+    chunks.push({
+      from: cur.toISOString().substring(0, 10),
+      to: chunkEnd.toISOString().substring(0, 10),
+      label: MONTH_NAMES[cur.getUTCMonth()] + ' ' + cur.getUTCFullYear()
+    });
+    cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
+  }
+  return chunks;
+}
+
+// ── Fallback chunk list: <=62 din → per day | >62 → per month ──
 function buildChunkList(df, dt) {
   const start = new Date(df + 'T00:00:00Z');
   const end = new Date(dt + 'T00:00:00Z');
   const totalDays = Math.round((end - start) / 86400000) + 1;
-  const chunks = [];
-
   if (totalDays <= 62) {
+    const chunks = [];
     let d = new Date(start);
     while (d <= end) {
       const iso = d.toISOString().substring(0, 10);
       chunks.push({ from: iso, to: iso, label: iso });
       d.setUTCDate(d.getUTCDate() + 1);
     }
-  } else {
-    // Month-by-month (This Year / lambi ranges)
-    let cur = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
-    while (cur <= end) {
-      const monthEnd = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0));
-      const chunkEnd = monthEnd > end ? end : monthEnd;
-      const fromIso = cur.toISOString().substring(0, 10);
-      const toIso = chunkEnd.toISOString().substring(0, 10);
-      chunks.push({ from: fromIso, to: toIso, label: fromIso.substring(0, 7) }); // "2026-01"
-      cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
-    }
+    return chunks;
   }
-  return chunks;
+  return buildMonthChunks(df, dt);
 }
 
 module.exports = { scrape };
