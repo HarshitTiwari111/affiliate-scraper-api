@@ -1,12 +1,11 @@
 // ============================================================
-// STARZPARTNERS — v7 (PROMO-FIX)
+// STARZPARTNERS — v8 (CLIENT-API FIX)
 //
 // PROMO MODE (Col H me promoIds diya ho):
-//   traffic_report promo_id ko IGNORE karta hai (hamesha account total deta hai).
-//   Isliye promo filter ke liye SEEDHA /api/customer/v1/partner/report endpoint use hota hai
-//   (group_by me 'promo' ke saath), phir client-side sirf wanted promo ki rows filter hoti hain.
-//   Scraper khud multiple group_by combos + date_group_by variants try karta hai — jo asli
-//   date pe data de, wahi use hoga. Koi manual diagnostic nahi.
+//   Sahi endpoint = /api/client/partner/report (UI yahi call karta hai).
+//   Exact UI param format: columns[]=..., group_by[]=promo, convert_all_currencies=true,
+//   exchange_rates_date = aaj ki date. Phir client-side sirf wanted promo ki rows filter.
+//   Scraper khud /api/client aur (fallback) /api/customer dono + multiple group_by try karta hai.
 //
 // NO-FILTER MODE (promoIds nahi diya):
 //   Pehle jaisa — traffic_report daily (<=62 din) ya monthly (>62 din).
@@ -16,11 +15,7 @@
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-const REPORT_COLUMNS = JSON.stringify([
-  'visits_count', 'registrations_count', 'first_deposits_count',
-  'deposits_sum', 'average_deposit_amount', 'ngr'
-]);
-
+const REPORT_COL_KEYS = ['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'average_deposit_amount', 'ngr'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 async function scrape(c, df, dt, cp) {
@@ -32,13 +27,14 @@ async function scrape(c, df, dt, cp) {
     .trim().split(',').map(s => s.trim()).filter(Boolean);
 
   const headers = {
-    'Accept': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
     'Authorization': String(token),
-    'User-Agent': 'Mozilla/5.0'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'X-Requested-With': 'XMLHttpRequest'
   };
 
   // ════════════════════════════════════════════
-  // PROMO MODE — /report endpoint + client-side promo filter
+  // PROMO MODE — /api/client/partner/report + client-side promo filter
   // ════════════════════════════════════════════
   if (wants.length) {
     console.log('StarzPartners PROMO MODE: ' + wants.join(',') + ' | ' + df + ' -> ' + dt);
@@ -52,19 +48,17 @@ async function scrape(c, df, dt, cp) {
   const monthly = totalDays > 62;
 
   if (!monthly) {
-    // Chhota range: single request, daily rows
-    const result = await fetchTraffic(base, headers, df, dt, '');
+    const result = await fetchTraffic(base, headers, df, dt);
     if (result && result.objs.length) {
       console.log('  -> traffic_report daily: ' + result.objs.length + ' rows');
       return formatDaily(result.objs, df, dt);
     }
   } else {
-    // Lamba range: har month alag request, monthly rows
     const monthChunks = buildMonthChunks(df, dt);
     console.log('  -> traffic_report monthly mode: ' + monthChunks.length + ' month requests');
     const rows = [];
     for (const ch of monthChunks) {
-      const result = await fetchTraffic(base, headers, ch.from, ch.to, '');
+      const result = await fetchTraffic(base, headers, ch.from, ch.to);
       await sleep(1200);
       const t = sumObjs((result && result.objs) ? result.objs : []);
       rows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
@@ -82,42 +76,37 @@ async function scrape(c, df, dt, cp) {
 }
 
 // ════════════════════════════════════════════
-// PROMO REPORT — self-discover working group_by, filter to wanted promo
+// PROMO REPORT — correct /api/client endpoint, self-discover, filter
 // ════════════════════════════════════════════
 async function promoReport(base, headers, df, dt, wants) {
-  // Group_by combos — jo bhi 'promo' dimension de, uski har promo alag row aayegi.
-  const groupByCombos = [
-    ['brand', 'campaign', 'promo'],
-    ['campaign', 'promo'],
-    ['brand', 'promo'],
-    ['promo']
-  ];
-  // UI me "Period: Day" hota hai — isliye date_group_by=day pehle try, phir bina.
-  const dateGroupVariants = ['&date_group_by=day', ''];
+  const today = new Date().toISOString().substring(0, 10); // exchange_rates_date = aaj
+
+  // UI /api/client use karta hai; fallback me /api/customer bhi try
+  const paths = ['/api/client/partner/report', '/api/customer/v1/partner/report'];
+  // UI sirf ['promo'] bhejta hai; baaki combos safety ke liye
+  const groupByCombos = [['promo'], ['brand', 'campaign', 'promo'], ['campaign', 'promo'], ['brand', 'promo']];
 
   const seenPromo = {};
   let anyData = false;
 
-  for (const dg of dateGroupVariants) {
+  for (const path of paths) {
     for (const gb of groupByCombos) {
-      const url = buildReportUrl(base, gb, df, dt) + dg;
-      const result = await tryFetch(url, headers, 'promo-report gb=' + gb.join('+') + dg);
-      await sleep(1500);
+      const url = buildClientReportUrl(base, path, gb, df, dt, today);
+      const result = await tryFetch(url, headers, 'promo ' + path + ' gb=' + gb.join('+'));
+      await sleep(1200);
       if (!result || !result.objs.length) continue;
       anyData = true;
 
-      // Debug ke liye promo-ish values yaad rakho (agar match na ho)
+      // Debug ke liye promo-ish values yaad rakho
       result.objs.forEach(o => {
         Object.keys(o).forEach(k => {
-          if (k.toLowerCase().indexOf('promo') >= 0) {
-            seenPromo[k + '=' + String(o[k]).substring(0, 40)] = true;
-          }
+          if (k.toLowerCase().indexOf('promo') >= 0) seenPromo[k + '=' + String(o[k]).substring(0, 40)] = true;
         });
       });
 
       const matched = filterRows(result.objs, wants);
       if (matched.length) {
-        console.log('  -> PROMO MATCH: gb=' + gb.join('+') + dg + ' | ' + matched.length + ' rows');
+        console.log('  -> PROMO MATCH: ' + path + ' gb=' + gb.join('+') + ' | ' + matched.length + ' rows');
         return formatPromoRows(matched, df, dt);
       }
     }
@@ -125,16 +114,33 @@ async function promoReport(base, headers, df, dt, wants) {
 
   if (anyData) {
     const seen = Object.keys(seenPromo).slice(0, 20);
-    throw new Error('StarzPartners: /report data mila par promo "' + wants.join(',')
+    throw new Error('StarzPartners: report data mila par promo "' + wants.join(',')
       + '" match nahi hua.\nAPI me ye promo values dikhi:\n'
       + (seen.length ? seen.join('\n') : '(promo field hi nahi mila)')
-      + '\n\nCol H me promoIds me inme se sahi wali ID/value daal.');
+      + '\nCol H me promoIds me inme se sahi value daal.');
   }
-  throw new Error('StarzPartners: /report endpoint se ' + df + ' -> ' + dt
-    + ' range me KOI data nahi mila (saare group_by combos empty). Date range sahi hai? Render logs bhej.');
+  throw new Error('StarzPartners: /api/client + /api/customer dono report endpoints se '
+    + df + ' -> ' + dt + ' me KOI data nahi mila.\n'
+    + 'Agar status 401/403 aaya to token session-based hai (UI cookie + X-Csrf-Token use karta hai) '
+    + 'aur us case me username/password login flow chahiye. Render logs me status code check kar.');
 }
 
-// Matched (promo-filtered) objs ko output rows me convert karo
+// UI jaisa exact URL: columns[]=, group_by[]=promo, convert_all_currencies=true, exchange_rates_date=today
+function buildClientReportUrl(base, path, groupBy, from, to, today) {
+  let url = base + path
+    + '?from=' + encodeURIComponent(from)
+    + '&to=' + encodeURIComponent(to)
+    + '&period=custom'
+    + '&exchange_rates_date=' + encodeURIComponent(today)
+    + '&convert_all_currencies=true'
+    + '&conversion_currency=EUR';
+  REPORT_COL_KEYS.forEach(k => { url += '&columns%5B%5D=' + k; });
+  groupBy.forEach(g => { url += '&group_by%5B%5D=' + encodeURIComponent(g); });
+  url += '&promo_codes%5B%5D=&strategies%5B%5D=&player_dynamic_tags_include%5B%5D=&player_dynamic_tags_exclude%5B%5D=';
+  return url;
+}
+
+// Matched (promo-filtered) objs -> output rows
 function formatPromoRows(objs, df, dt) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
@@ -148,7 +154,6 @@ function formatPromoRows(objs, df, dt) {
   const num = (o, k) => k ? (parseFloat(o[k]) || 0) : 0;
 
   if (dateKey) {
-    // Date-wise group (ek promo ki multiple din ki rows)
     const byDate = {};
     objs.forEach(o => {
       const d = String(o[dateKey]).substring(0, 10);
@@ -159,7 +164,6 @@ function formatPromoRows(objs, df, dt) {
       byDate[d].dep += num(o, dKey);
       byDate[d].n += num(o, nKey);
     });
-    // Missing din 0 se fill (range ke andar)
     let cur = new Date(df + 'T00:00:00Z');
     const endD = new Date(dt + 'T00:00:00Z');
     while (cur <= endD) {
@@ -174,7 +178,6 @@ function formatPromoRows(objs, df, dt) {
     return { headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
   }
 
-  // Date field nahi — single aggregate row
   const t = sumObjs(objs);
   const label = (df === dt) ? df : (df + ' -> ' + dt);
   return {
@@ -184,12 +187,11 @@ function formatPromoRows(objs, df, dt) {
 }
 
 // ── Traffic_report single request (no-filter mode) ──
-async function fetchTraffic(base, headers, from, to, fv) {
+async function fetchTraffic(base, headers, from, to) {
   const url = base + '/api/customer/v1/partner/traffic_report'
     + '?from=' + encodeURIComponent(from)
     + '&to=' + encodeURIComponent(to)
-    + '&date_group_by=day'
-    + fv;
+    + '&date_group_by=day';
   return await tryFetch(url, headers, 'traffic ' + from + '->' + to);
 }
 
@@ -253,21 +255,6 @@ async function tryFetch(url, headers, label) {
   return { objs };
 }
 
-function buildReportUrl(base, groupBy, from, to) {
-  return base + '/api/customer/v1/partner/report'
-    + '?columns=' + encodeURIComponent(REPORT_COLUMNS)
-    + '&group_by=' + encodeURIComponent(JSON.stringify(groupBy))
-    + '&from=' + encodeURIComponent(from)
-    + '&to=' + encodeURIComponent(to)
-    + '&period=custom'
-    + '&conversion_currency=EUR&convert_all_currencies=1'
-    + '&exchange_rates_date=' + encodeURIComponent(to)
-    + '&promo_codes=' + encodeURIComponent('[]')
-    + '&strategies=' + encodeURIComponent('[]')
-    + '&player_dynamic_tags_include=' + encodeURIComponent('[]')
-    + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
-}
-
 // ── Client-side promo filter: row me wanted ID/value substring dhundo ──
 function filterRows(objs, wants) {
   if (!wants.length) return objs;
@@ -301,7 +288,6 @@ function formatDaily(objs, df, dt) {
     byDate[d].n += parseFloat(o[nKey]) || 0;
   });
 
-  // Missing din 0 se fill
   let cur = new Date(df + 'T00:00:00Z');
   const endD = new Date(dt + 'T00:00:00Z');
   while (cur <= endD) {
