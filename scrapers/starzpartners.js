@@ -1,9 +1,16 @@
 // ============================================================
-// STARZPARTNERS — FINAL (v6)
-// Route 1: /partner/traffic_report
-//   <=62 din: single request, daily rows
-//   >62 din:  PER-MONTH requests (API ~120 row cap se bachne ke liye), monthly rows
-// Route 2: /partner/report (group_by discovery) | Route 3: chunk loop
+// STARZPARTNERS — v7 (PROMO-FIX)
+//
+// PROMO MODE (Col H me promoIds diya ho):
+//   traffic_report promo_id ko IGNORE karta hai (hamesha account total deta hai).
+//   Isliye promo filter ke liye SEEDHA /api/customer/v1/partner/report endpoint use hota hai
+//   (group_by me 'promo' ke saath), phir client-side sirf wanted promo ki rows filter hoti hain.
+//   Scraper khud multiple group_by combos + date_group_by variants try karta hai — jo asli
+//   date pe data de, wahi use hoga. Koi manual diagnostic nahi.
+//
+// NO-FILTER MODE (promoIds nahi diya):
+//   Pehle jaisa — traffic_report daily (<=62 din) ya monthly (>62 din).
+//
 // Col H: baseUrl:https://starzpartners.com,promoIds:30482,columns:Date.Month.Visits.Registrations.First Deposits
 // ============================================================
 
@@ -30,120 +37,160 @@ async function scrape(c, df, dt, cp) {
     'User-Agent': 'Mozilla/5.0'
   };
 
+  // ════════════════════════════════════════════
+  // PROMO MODE — /report endpoint + client-side promo filter
+  // ════════════════════════════════════════════
+  if (wants.length) {
+    console.log('StarzPartners PROMO MODE: ' + wants.join(',') + ' | ' + df + ' -> ' + dt);
+    return await promoReport(base, headers, df, dt, wants);
+  }
+
+  // ════════════════════════════════════════════
+  // NO-FILTER MODE — traffic_report (pehle jaisa)
+  // ════════════════════════════════════════════
   const totalDays = Math.round((new Date(dt + 'T00:00:00Z') - new Date(df + 'T00:00:00Z')) / 86400000) + 1;
   const monthly = totalDays > 62;
 
-  // Promo filter variants (jo pehla month pe chale, wahi aage use hoga)
-  const trafficVariants = [];
-  if (wants.length) {
-    trafficVariants.push('&promo_id=' + encodeURIComponent(wants[0]));
-    trafficVariants.push('&promo_ids=' + encodeURIComponent(JSON.stringify(wants.map(Number))));
-    trafficVariants.push('&promo_ids=' + encodeURIComponent(wants.join(',')));
-  } else {
-    trafficVariants.push('');
-  }
-
-  // ════════════════════════════════════════════
-  // ROUTE 1 — TRAFFIC_REPORT
-  // ════════════════════════════════════════════
   if (!monthly) {
-    // ── Chhota range: single request, daily rows ──
-    for (const fv of trafficVariants) {
-      const result = await fetchTraffic(base, headers, df, dt, fv);
-      if (result && result.objs.length) {
-        console.log('  -> ROUTE 1 SUCCESS (daily): ' + result.objs.length + ' rows');
-        return formatDaily(result.objs, df, dt);
-      }
-      await sleep(2000);
+    // Chhota range: single request, daily rows
+    const result = await fetchTraffic(base, headers, df, dt, '');
+    if (result && result.objs.length) {
+      console.log('  -> traffic_report daily: ' + result.objs.length + ' rows');
+      return formatDaily(result.objs, df, dt);
     }
   } else {
-    // ── Lamba range: HAR MONTH alag request (API row-cap bypass) ──
+    // Lamba range: har month alag request, monthly rows
     const monthChunks = buildMonthChunks(df, dt);
-    console.log('  -> ROUTE 1 monthly mode: ' + monthChunks.length + ' month requests');
-
-    // Working promo variant dhundo — months pe try karo jab tak kisi mein rows na milein
-    let workingFv = null;
-    let prefetched = {}; // label -> objs (dobara fetch na karna pade)
-
-    outer:
-    for (const fv of trafficVariants) {
-      for (const ch of monthChunks) {
-        const result = await fetchTraffic(base, headers, ch.from, ch.to, fv);
-        await sleep(1200);
-        if (result && result.objs.length) {
-          workingFv = fv;
-          prefetched[ch.label] = result.objs;
-          console.log('  -> working promo variant mila (month ' + ch.label + ')');
-          break outer;
-        }
-      }
+    console.log('  -> traffic_report monthly mode: ' + monthChunks.length + ' month requests');
+    const rows = [];
+    for (const ch of monthChunks) {
+      const result = await fetchTraffic(base, headers, ch.from, ch.to, '');
+      await sleep(1200);
+      const t = sumObjs((result && result.objs) ? result.objs : []);
+      rows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
+      console.log('  -> ' + ch.label + ': visits=' + t.v + ' regs=' + t.r + ' ftd=' + t.f);
     }
-
-    if (workingFv !== null) {
-      const rows = [];
-      for (const ch of monthChunks) {
-        let objs = prefetched[ch.label];
-        if (!objs) {
-          const result = await fetchTraffic(base, headers, ch.from, ch.to, workingFv);
-          objs = (result && result.objs) ? result.objs : [];
-          await sleep(1200);
-        }
-        const t = sumObjs(objs);
-        rows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
-        console.log('  -> ' + ch.label + ': visits=' + t.v + ' regs=' + t.r + ' ftd=' + t.f);
-      }
-      return { headers: ['Month', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
-    }
+    return { headers: ['Month', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
   }
-  console.log('  -> Route 1 (traffic_report) se kuch nahi mila, Route 2...');
 
-  // ── Fallback chunks ──
+  // Fallback: zero-fill
   const chunks = buildChunkList(df, dt);
-
-  // ════════════════════════════════════════════
-  // ROUTE 2 — REPORT endpoint, group_by token discovery
-  // ════════════════════════════════════════════
-  const promoTokens = ['promo', 'promos', 'promo_id', 'promo_code', 'promo_hash'];
-
-  for (const pt of promoTokens) {
-    const url = buildReportUrl(base, ['brand', 'campaign', pt], df, dt);
-    const result = await tryFetch(url, headers, 'report group_by=' + pt);
-    if (result && result.objs.length) {
-      console.log('  -> ROUTE 2 SUCCESS: group_by "' + pt + '" works!');
-      return await chunkLoop(base, headers, ['brand', 'campaign', pt], chunks, wants, df, dt);
-    }
-    await sleep(2000);
-  }
-  console.log('  -> Route 2 se kuch nahi mila, Route 3...');
-
-  // ════════════════════════════════════════════
-  // ROUTE 3 — brand+campaign chunk loop
-  // ════════════════════════════════════════════
-  const baseResult = await tryFetch(buildReportUrl(base, ['brand', 'campaign'], df, dt), headers, 'report brand+campaign');
-
-  if (!baseResult || !baseResult.objs.length) {
-    console.log('  -> Account mein is range mein KOI data nahi');
-    return {
-      headers: [monthly ? 'Month' : 'Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
-      rows: chunks.map(ch => [ch.label, '0', '0', '0', '0.00', '0.00'])
-    };
-  }
-
-  if (wants.length) {
-    throw new Error('StarzPartners: account mein data HAI lekin promo-level breakdown kisi route se nahi mila — Render logs bhej.');
-  }
-
-  return await chunkLoop(base, headers, ['brand', 'campaign'], chunks, [], df, dt);
+  return {
+    headers: [monthly ? 'Month' : 'Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
+    rows: chunks.map(ch => [ch.label, '0', '0', '0', '0.00', '0.00'])
+  };
 }
 
-// ── Traffic_report single request ──
+// ════════════════════════════════════════════
+// PROMO REPORT — self-discover working group_by, filter to wanted promo
+// ════════════════════════════════════════════
+async function promoReport(base, headers, df, dt, wants) {
+  // Group_by combos — jo bhi 'promo' dimension de, uski har promo alag row aayegi.
+  const groupByCombos = [
+    ['brand', 'campaign', 'promo'],
+    ['campaign', 'promo'],
+    ['brand', 'promo'],
+    ['promo']
+  ];
+  // UI me "Period: Day" hota hai — isliye date_group_by=day pehle try, phir bina.
+  const dateGroupVariants = ['&date_group_by=day', ''];
+
+  const seenPromo = {};
+  let anyData = false;
+
+  for (const dg of dateGroupVariants) {
+    for (const gb of groupByCombos) {
+      const url = buildReportUrl(base, gb, df, dt) + dg;
+      const result = await tryFetch(url, headers, 'promo-report gb=' + gb.join('+') + dg);
+      await sleep(1500);
+      if (!result || !result.objs.length) continue;
+      anyData = true;
+
+      // Debug ke liye promo-ish values yaad rakho (agar match na ho)
+      result.objs.forEach(o => {
+        Object.keys(o).forEach(k => {
+          if (k.toLowerCase().indexOf('promo') >= 0) {
+            seenPromo[k + '=' + String(o[k]).substring(0, 40)] = true;
+          }
+        });
+      });
+
+      const matched = filterRows(result.objs, wants);
+      if (matched.length) {
+        console.log('  -> PROMO MATCH: gb=' + gb.join('+') + dg + ' | ' + matched.length + ' rows');
+        return formatPromoRows(matched, df, dt);
+      }
+    }
+  }
+
+  if (anyData) {
+    const seen = Object.keys(seenPromo).slice(0, 20);
+    throw new Error('StarzPartners: /report data mila par promo "' + wants.join(',')
+      + '" match nahi hua.\nAPI me ye promo values dikhi:\n'
+      + (seen.length ? seen.join('\n') : '(promo field hi nahi mila)')
+      + '\n\nCol H me promoIds me inme se sahi wali ID/value daal.');
+  }
+  throw new Error('StarzPartners: /report endpoint se ' + df + ' -> ' + dt
+    + ' range me KOI data nahi mila (saare group_by combos empty). Date range sahi hai? Render logs bhej.');
+}
+
+// Matched (promo-filtered) objs ko output rows me convert karo
+function formatPromoRows(objs, df, dt) {
+  const keys = Object.keys(objs[0]);
+  const dateKey = keys.find(k => {
+    const lk = k.toLowerCase();
+    return lk === 'date' || lk === 'day' || lk === 'period' || /^\d{4}-\d{2}-\d{2}/.test(String(objs[0][k] || ''));
+  });
+  const findKey = (pats) => keys.find(k => pats.some(p => k.toLowerCase().indexOf(p) >= 0));
+  const vKey = findKey(['visit']), rKey = findKey(['registration', 'signup']),
+    fKey = findKey(['first_deposit', 'ftd']), dKey = findKey(['deposits_sum', 'deposit_sum']),
+    nKey = findKey(['ngr']);
+  const num = (o, k) => k ? (parseFloat(o[k]) || 0) : 0;
+
+  if (dateKey) {
+    // Date-wise group (ek promo ki multiple din ki rows)
+    const byDate = {};
+    objs.forEach(o => {
+      const d = String(o[dateKey]).substring(0, 10);
+      if (!byDate[d]) byDate[d] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+      byDate[d].v += num(o, vKey);
+      byDate[d].r += num(o, rKey);
+      byDate[d].f += num(o, fKey);
+      byDate[d].dep += num(o, dKey);
+      byDate[d].n += num(o, nKey);
+    });
+    // Missing din 0 se fill (range ke andar)
+    let cur = new Date(df + 'T00:00:00Z');
+    const endD = new Date(dt + 'T00:00:00Z');
+    while (cur <= endD) {
+      const key = cur.toISOString().substring(0, 10);
+      if (!byDate[key]) byDate[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0 };
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    const rows = Object.keys(byDate).sort().map(d => {
+      const x = byDate[d];
+      return [d, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
+    });
+    return { headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
+  }
+
+  // Date field nahi — single aggregate row
+  const t = sumObjs(objs);
+  const label = (df === dt) ? df : (df + ' -> ' + dt);
+  return {
+    headers: ['Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
+    rows: [[label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]]
+  };
+}
+
+// ── Traffic_report single request (no-filter mode) ──
 async function fetchTraffic(base, headers, from, to, fv) {
   const url = base + '/api/customer/v1/partner/traffic_report'
     + '?from=' + encodeURIComponent(from)
     + '&to=' + encodeURIComponent(to)
     + '&date_group_by=day'
     + fv;
-  return await tryFetch(url, headers, 'traffic ' + from + '→' + to);
+  return await tryFetch(url, headers, 'traffic ' + from + '->' + to);
 }
 
 // ── Objs ka total ──
@@ -221,46 +268,7 @@ function buildReportUrl(base, groupBy, from, to) {
     + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
 }
 
-// ── Chunk loop (Route 2/3 fallback) with client-side promo filter ──
-async function chunkLoop(base, headers, groupBy, chunks, wants, df, dt) {
-  const outRows = [];
-  let matchedAny = false;
-  const seenValues = {};
-
-  for (const ch of chunks) {
-    let objs = [];
-    const result = await tryFetch(buildReportUrl(base, groupBy, ch.from, ch.to), headers, 'chunk ' + ch.label);
-    if (result) objs = result.objs;
-
-    objs.forEach(o => {
-      Object.keys(o).forEach(k => {
-        const lk = k.toLowerCase();
-        if (lk.indexOf('promo') >= 0 || lk === 'campaign' || lk === 'brand') {
-          seenValues[k + ': ' + String(o[k]).substring(0, 50)] = true;
-        }
-      });
-    });
-
-    const matched = filterRows(objs, wants);
-    if (matched.length) matchedAny = true;
-
-    const t = sumObjs(matched);
-    outRows.push([ch.label, String(t.v), String(t.r), String(t.f), t.dep.toFixed(2), t.n.toFixed(2)]);
-    await sleep(1500);
-  }
-
-  if (wants.length && !matchedAny) {
-    const seen = Object.keys(seenValues).slice(0, 15);
-    throw new Error('StarzPartners: "' + wants.join(',') + '" match nahi hua.\nAPI values:\n' + (seen.length ? seen.join('\n') : '(khali)'));
-  }
-
-  const isMonthly = chunks.length > 0 && chunks[0].from !== chunks[0].to;
-  return {
-    headers: [isMonthly ? 'Month' : 'Date', 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'],
-    rows: outRows
-  };
-}
-
+// ── Client-side promo filter: row me wanted ID/value substring dhundo ──
 function filterRows(objs, wants) {
   if (!wants.length) return objs;
   const lw = wants.map(w => w.toLowerCase());
@@ -270,7 +278,7 @@ function filterRows(objs, wants) {
   });
 }
 
-// ── Daily output (chhote ranges), missing din 0 se fill ──
+// ── Daily output (no-filter chhote ranges), missing din 0 se fill ──
 function formatDaily(objs, df, dt) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
@@ -328,7 +336,7 @@ function buildMonthChunks(df, dt) {
   return chunks;
 }
 
-// ── Fallback chunk list: <=62 din → per day | >62 → per month ──
+// ── Fallback chunk list: <=62 din -> per day | >62 -> per month ──
 function buildChunkList(df, dt) {
   const start = new Date(df + 'T00:00:00Z');
   const end = new Date(dt + 'T00:00:00Z');
