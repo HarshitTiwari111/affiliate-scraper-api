@@ -167,6 +167,52 @@ app.get('/starz-exact', async (q, r) => {
   } catch (e) { r.json({ error: e.message }); }
 });
 
+// ============================================================
+// TEMPORARY DEBUG — /report with promo group_by on a KNOWN-DATA date
+// Browser me khol: /starz-promo?token=YOUR_STARZ_TOKEN
+// (optional: &from=2026-06-25&to=2026-06-25)
+// 4 group_by combos try karta hai — jo promo-wise rows de, wahi sahi.
+// ============================================================
+app.get('/starz-promo', async (q, r) => {
+  try {
+    const token = q.query.token || '';
+    const base = 'https://starzpartners.com';
+    const headers = { 'Accept': 'application/json', 'Authorization': String(token), 'User-Agent': 'Mozilla/5.0' };
+    const columns = JSON.stringify(['visits_count', 'registrations_count', 'first_deposits_count', 'deposits_sum', 'ngr']);
+    const from = q.query.from || '2026-06-25';
+    const to = q.query.to || '2026-06-25';
+    const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+    // Different group_by combos try karo — jo promo-level breakdown de wahi sahi
+    const combos = {
+      'brand_campaign_promo': ['brand', 'campaign', 'promo'],
+      'promo_only': ['promo'],
+      'campaign_promo': ['campaign', 'promo'],
+      'brand_promo': ['brand', 'promo']
+    };
+
+    const out = {};
+    for (const name of Object.keys(combos)) {
+      const url = base + '/api/customer/v1/partner/report'
+        + '?columns=' + encodeURIComponent(columns)
+        + '&group_by=' + encodeURIComponent(JSON.stringify(combos[name]))
+        + '&from=' + from + '&to=' + to
+        + '&period=custom&conversion_currency=EUR&convert_all_currencies=1&exchange_rates_date=' + to
+        + '&promo_codes=' + encodeURIComponent('[]')
+        + '&strategies=' + encodeURIComponent('[]')
+        + '&player_dynamic_tags_include=' + encodeURIComponent('[]')
+        + '&player_dynamic_tags_exclude=' + encodeURIComponent('[]');
+      try {
+        const resp = await fetch(url, { headers });
+        const body = await resp.text();
+        out[name] = { groupBy: combos[name], status: resp.status, full: body.substring(0, 1200) };
+      } catch (e) { out[name] = { error: e.message }; }
+      await sleep(2500);
+    }
+    r.json(out);
+  } catch (e) { r.json({ error: e.message }); }
+});
+
 app.post('/scrape', async (q, r) => {
   const { platform, dateFrom, dateTo, credentials } = q.body;
   if (!platform || !dateFrom || !dateTo || !credentials) {
