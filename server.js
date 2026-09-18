@@ -8,8 +8,9 @@ const ecOauth = require('./scrapers/elitecasino-oauth'); // Elite Casino OAuth (
 const bm = require('./scrapers/betmen');                 // Betmen Cellxpert API-key (no browser)
 const vp = require('./scrapers/vpartners');              // V.Partners remote-stats (no browser)
 const sp = require('./scrapers/starzpartners');          // StarzPartners Partner API (no browser)
+const tp = require('./scrapers/thunderpartners');        // Thunder Partners login + Cellxpert API (no browser)
 
-app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen', 'vpartners', 'starzpartners'] }));
+app.get('/', (q, r) => r.json({ status: 'ok', scrapers: ['elitecasino', 'betmen', 'vpartners', 'starzpartners', 'thunderpartners'] }));
 app.get('/health', (q, r) => r.json({ status: 'ok', chrome: CHROME }));
 
 app.get('/myip', async (q, r) => {
@@ -225,6 +226,7 @@ app.post('/scrape', async (q, r) => {
       case 'betmen':        result = await bm.scrape(credentials, dateFrom, dateTo, CHROME); break;
       case 'vpartners':     result = await vp.scrape(credentials, dateFrom, dateTo, CHROME); break;
       case 'starzpartners': result = await sp.scrape(credentials, dateFrom, dateTo, CHROME); break;
+      case 'thunderpartners': result = await tp.scrape(credentials, dateFrom, dateTo, CHROME); break;
       default: return r.status(400).json({ error: 'Unknown or unsupported platform: ' + platform });
     }
     r.json({ success: true, headers: result.headers, rows: result.rows });
