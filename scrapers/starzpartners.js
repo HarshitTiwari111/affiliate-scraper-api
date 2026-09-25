@@ -28,8 +28,14 @@ async function scrape(c, df, dt, cp) {
   const token = c.token || c.username;
   if (!token) throw new Error('StarzPartners: STATISTIC_TOKEN missing (Col C).');
 
-  const wants = String(c.promoIds || c.promo_ids || c.campaignId || c.campaign_ids || '')
-    .trim().split(',').map(s => s.trim()).filter(Boolean);
+   const promoWants = String(c.promoIds || c.promo_ids || '').trim().split(',').map(s => s.trim()).filter(Boolean);
+  const campWants  = String(c.campaignId || c.campaign_ids || '').trim().split(',').map(s => s.trim()).filter(Boolean);
+  const brandWant  = String(c.brand || '').trim();
+  let dim = null, wants = [];
+  if (brandWant && brandWant !== '__all__') { dim = 'brand';    wants = [brandWant]; }
+  else if (campWants.length)               { dim = 'campaign'; wants = campWants; }
+  else if (promoWants.length)              { dim = 'promo';    wants = promoWants; }
+  const showBrand = !!(c.brands || brandWant);
 
   const headers = {
     'Accept': 'application/json',
@@ -44,42 +50,29 @@ async function scrape(c, df, dt, cp) {
   const dateGrouper = monthly ? 'month' : 'day';
 
   // ════════════════════════════════════════════
-  // PROMO MODE — group_by[]=day/month + promo, filter client-side
+  // REPORT — group_by[]=day/month (+ brand/campaign/promo), filter client-side
   // ════════════════════════════════════════════
-  if (wants.length) {
-    console.log('StarzPartners PROMO MODE: ' + wants.join(',') + ' | ' + df + ' -> ' + dt + ' | grouper=' + dateGrouper);
-    const url = buildReportUrl(base, [dateGrouper, 'promo'], REPORT_COL_KEYS, df, dt, today);
-    const result = await tryFetch(url, headers, 'promo-report ' + dateGrouper + '+promo');
+  const groupBy = [dateGrouper];
+  if (dim) groupBy.push(dim); else if (showBrand) groupBy.push('brand');
+  console.log('StarzPartners: ' + df + ' -> ' + dt + ' | group_by=' + groupBy.join(',') + (dim ? ' | ' + dim + '=' + wants.join(',') : ''));
 
-    if (!result) throw new Error('StarzPartners: report request fail (network/auth). Render logs me status check kar.');
-    if (!result.objs.length) {
-      throw new Error('StarzPartners: report khaali aaya ' + df + ' -> ' + dt + ' range me. '
-        + 'Is range/promo me data hai? Sheet me date range check kar.');
-    }
+  const url = buildReportUrl(base, groupBy, REPORT_COL_KEYS, df, dt, today);
+  const result = await tryFetch(url, headers, 'report ' + groupBy.join('+'));
+  if (!result) throw new Error('StarzPartners: report request fail (network/auth). Render logs me status check kar.');
 
-    // Promo filter — promo_id ya promo field pe match
-    const matched = filterByPromo(result.objs, wants);
+  let objs = result.objs;
+  if (dim && objs.length) {
+    const matched = filterByDim(objs, wants, dim);
     if (!matched.length) {
-      const seen = collectPromoValues(result.objs);
-      throw new Error('StarzPartners: promo "' + wants.join(',') + '" match nahi hua.\n'
-        + 'API me ye promo values dikhi:\n' + (seen.length ? seen.join('\n') : '(promo field nahi mila — data me promo dimension shayad nahi aaya)')
-        + '\nCol H me promoIds me sahi value daal.');
+      const seen = collectDimValues(objs, dim);
+      throw new Error('StarzPartners: ' + dim + ' "' + wants.join(',') + '" match nahi hua.\nAPI me ye values dikhi:\n'
+        + (seen.length ? seen.join('\n') : '(' + dim + ' field nahi mila)') + '\nDashboards sheet Col H me sahi naam daal.');
     }
-
-    console.log('  -> PROMO MATCH: ' + matched.length + ' rows');
-    return formatRows(matched, df, dt, monthly);
+    objs = matched;
   }
-
-  // ════════════════════════════════════════════
-  // NO-FILTER MODE — report group_by[]=day/month
-  // ════════════════════════════════════════════
-  console.log('StarzPartners NO-FILTER: ' + df + ' -> ' + dt + ' | grouper=' + dateGrouper);
-  const url = buildReportUrl(base, [dateGrouper], REPORT_COL_KEYS, df, dt, today);
-  const result = await tryFetch(url, headers, 'report ' + dateGrouper);
-
-  if (result && result.objs.length) {
-    console.log('  -> report: ' + result.objs.length + ' rows');
-    return formatRows(result.objs, df, dt, monthly);
+  if (objs.length) {
+    console.log('  -> report: ' + objs.length + ' rows');
+    return formatRows(objs, df, dt, monthly);
   }
 
   // Fallback: zero-fill
@@ -103,39 +96,35 @@ function buildReportUrl(base, groupBy, cols, from, to, today) {
   return url;
 }
 
-// ── Promo filter: har row me promo_id / promo field dekho, wanted se match ──
-function filterByPromo(objs, wants) {
+// ── Dimension filter: brand / campaign / promo field pe match ──
+function filterByDim(objs, wants, dim) {
   const lw = wants.map(w => String(w).toLowerCase());
   return objs.filter(o => {
-    // promo-related keys ki value nikaalo
-    const promoVals = [];
-    Object.keys(o).forEach(k => {
-      if (k.toLowerCase().indexOf('promo') >= 0) promoVals.push(String(o[k]).toLowerCase());
-    });
-    // Agar promo field mila to usi pe match; warna poori row text pe (safety)
-    const hay = promoVals.length ? promoVals.join(' | ') : Object.values(o).map(v => String(v)).join(' | ').toLowerCase();
+    const vals = [];
+    Object.keys(o).forEach(k => { if (k.toLowerCase().indexOf(dim) >= 0) vals.push(String(o[k]).toLowerCase()); });
+    const hay = vals.length ? vals.join(' | ') : Object.values(o).map(v => String(v)).join(' | ').toLowerCase();
     return lw.some(w => hay.indexOf(w) >= 0);
   });
 }
 
-// ── Debug: kaunse promo values API me aaye ──
-function collectPromoValues(objs) {
+// ── Debug: kaunse brand/campaign/promo values API me aaye ──
+function collectDimValues(objs, dim) {
   const seen = {};
-  objs.forEach(o => {
-    Object.keys(o).forEach(k => {
-      if (k.toLowerCase().indexOf('promo') >= 0) seen[k + '=' + String(o[k]).substring(0, 40)] = true;
-    });
-  });
+  objs.forEach(o => Object.keys(o).forEach(k => {
+    if (k.toLowerCase().indexOf(dim) >= 0) seen[k + '=' + String(o[k]).substring(0, 40)] = true;
+  }));
   return Object.keys(seen).slice(0, 20);
 }
 
-// ── Rows ko output format me — date-wise group, missing din/month 0 fill ──
+// ── Rows ko output format me — date(+brand)-wise group, missing din/month 0 fill ──
 function formatRows(objs, df, dt, monthly) {
   const keys = Object.keys(objs[0]);
   const dateKey = keys.find(k => {
     const lk = k.toLowerCase();
     return lk === 'date' || lk === 'day' || lk === 'month' || lk === 'period' || /^\d{4}-\d{2}-\d{2}/.test(String(objs[0][k] || ''));
   });
+  const brandKey = keys.find(k => /^brand(_name|_title)?$/i.test(k))
+    || keys.find(k => k.toLowerCase().indexOf('brand') >= 0 && !/_?id$/i.test(k));
   const findKey = (pats) => keys.find(k => pats.some(p => k.toLowerCase().indexOf(p) >= 0));
   const vKey = findKey(['visit']), rKey = findKey(['registration', 'signup']),
     fKey = findKey(['first_deposit', 'ftd']), dKey = findKey(['deposits_sum', 'deposit_sum']),
@@ -160,37 +149,42 @@ function formatRows(objs, df, dt, monthly) {
     } else {
       label = (df === dt) ? df : (df + ' -> ' + dt);
     }
-    if (!bucket[label]) bucket[label] = { v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: (dateKey ? String(o[dateKey]).substring(0, 10) : label) };
-    bucket[label].v += numOf(o, vKey);
-    bucket[label].r += numOf(o, rKey);
-    bucket[label].f += numOf(o, fKey);
-    bucket[label].dep += numOf(o, dKey);
-    bucket[label].n += numOf(o, nKey);
+    const brand = brandKey ? String(o[brandKey] || '') : '';
+    const bk = label + '||' + brand;
+    if (!bucket[bk]) bucket[bk] = { label: label, brand: brand, v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: (dateKey ? String(o[dateKey]).substring(0, 10) : label) + '||' + brand };
+    bucket[bk].v += numOf(o, vKey);
+    bucket[bk].r += numOf(o, rKey);
+    bucket[bk].f += numOf(o, fKey);
+    bucket[bk].dep += numOf(o, dKey);
+    bucket[bk].n += numOf(o, nKey);
   });
 
-  // Missing periods 0 se fill (sirf date-wise ke liye)
-  if (dateKey && !monthly) {
+  // Missing periods 0 se fill (sirf jab brand column nahi)
+  if (dateKey && !brandKey && !monthly) {
     let cur = new Date(df + 'T00:00:00Z');
     const endD = new Date(dt + 'T00:00:00Z');
     while (cur <= endD) {
       const key = cur.toISOString().substring(0, 10);
-      if (!bucket[key]) bucket[key] = { v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: key };
+      if (!bucket[key + '||']) bucket[key + '||'] = { label: key, brand: '', v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: key + '||' };
       cur.setUTCDate(cur.getUTCDate() + 1);
     }
-  } else if (dateKey && monthly) {
+  } else if (dateKey && !brandKey && monthly) {
     buildMonthChunks(df, dt).forEach(ch => {
-      if (!bucket[ch.label]) bucket[ch.label] = { v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: ch.from };
+      if (!bucket[ch.label + '||']) bucket[ch.label + '||'] = { label: ch.label, brand: '', v: 0, r: 0, f: 0, dep: 0, n: 0, _sort: ch.from + '||' };
     });
   }
 
-  const rows = Object.keys(bucket)
-    .sort((a, b) => (bucket[a]._sort < bucket[b]._sort ? -1 : bucket[a]._sort > bucket[b]._sort ? 1 : 0))
-    .map(label => {
-      const x = bucket[label];
-      return [label, String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)];
+  const rows = Object.values(bucket)
+    .sort((a, b) => (a._sort < b._sort ? -1 : a._sort > b._sort ? 1 : 0))
+    .map(x => {
+      const r = [x.label];
+      if (brandKey) r.push(x.brand);
+      return r.concat([String(x.v), String(x.r), String(x.f), x.dep.toFixed(2), x.n.toFixed(2)]);
     });
 
-  return { headers: [(monthly ? 'Month' : 'Date'), 'Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR'], rows };
+  const headers = [monthly ? 'Month' : 'Date'];
+  if (brandKey) headers.push('Brand');
+  return { headers: headers.concat(['Visits', 'Registrations', 'First Deposits', 'Deposits Sum', 'NGR']), rows: rows };
 }
 
 // ── Fetch + flexible parse + LOG PREVIEW ──
