@@ -37,6 +37,13 @@ async function scrape(c, df, dt, cp) {
   else if (promoWants.length)              { dim = 'promo';    wants = promoWants; }
   const showBrand = !!(c.brands || brandWant);
 
+  // Col H brandmap:1=Bitstarz.2=Cashy  → brand_id ko naam me badlo
+  const brandMap = {};
+  String(c.brandmap || c.brandMap || '').split(/[.,]/).forEach(p => {
+    const m = p.trim().match(/^(\d+)\s*=\s*(.+)$/);
+    if (m) brandMap[m[1]] = m[2].trim();
+  });
+
   const headers = {
     'Accept': 'application/json',
     'Content-Type': 'application/json',
@@ -61,6 +68,12 @@ async function scrape(c, df, dt, cp) {
   if (!result) throw new Error('StarzPartners: report request fail (network/auth). Render logs me status check kar.');
 
   let objs = result.objs;
+  if (Object.keys(brandMap).length) {
+    objs.forEach(o => {
+      const idKey = Object.keys(o).find(k => /^brand_?id$/i.test(k));
+      if (idKey && brandMap[String(o[idKey])]) o.brand = brandMap[String(o[idKey])];
+    });
+  }
   if (dim && objs.length) {
     const matched = filterByDim(objs, wants, dim);
     if (!matched.length) {
