@@ -2,6 +2,7 @@
 // V.PARTNERS Remote Statistics — NO browser, JSON API.
 // <=62 din: single request, daily rows
 // >62 din:  month-by-month requests (API long-range limit bypass) + monthly summary
+// report=subid  =>  SUB_ID wala data (scrapeSubId)
 // ============================================================
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -11,6 +12,11 @@ async function scrape(c, df, dt, cp) {
   const base = (c.baseUrl || 'https://v.partners').replace(/\/+$/, '');
   const token = c.token || c.username || c.email;
   if (!token) throw new Error('V.Partners: remote-stats token missing (Col C).');
+
+  // ── NEW: SubID mode ──
+  if (String(c.report || '').toLowerCase().replace(/[\s_\-]/g, '') === 'subid') {
+    return scrapeSubId(c, df, dt);
+  }
 
   const monthly = spanDays(df, dt) > 62;
   let allRows = [];
@@ -76,12 +82,13 @@ async function scrape(c, df, dt, cp) {
   return { headers, rows };
 }
 
-// ── Single API request ──
-async function fetchStats(base, token, from, to) {
+// ── Single API request (extra = optional extra query string, default blank) ──
+async function fetchStats(base, token, from, to, extra) {
   const url = base + '/api/stats'
     + '?token=' + encodeURIComponent(token)
     + '&date_from=' + encodeURIComponent(from)
-    + '&date_to=' + encodeURIComponent(to);
+    + '&date_to=' + encodeURIComponent(to)
+    + (extra || '');
 
   const resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } });
   const body = await resp.text();
@@ -102,6 +109,134 @@ async function fetchStats(base, token, from, to) {
     }
   }
   return out;
+}
+
+// ============================================================
+// NEW: SUB_ID MODE
+// API ka sub-id parameter confirm nahi hai, isliye ye variants try karta hai
+// aur jisme utm_sub_id wali rows aaye wahi use karta hai.
+// ============================================================
+const SUBID_VARIANTS = [
+  '',
+  '&group_by=utm_sub_id', '&group_by=sub_id',
+  '&group=utm_sub_id', '&group=sub_id',
+  '&type=sub_id', '&report=sub_id',
+  '&breakdown=sub_id', '&tab=sub_id'
+];
+
+const SUBID_COLS = [
+  ['stats_date', 'Date'], ['title', 'Brand'],
+  ['utm_sub_id', 'Sub ID'], ['sub_id', 'Sub ID'],
+  ['landing_hits', 'Landing Hits'], ['hits', 'Hits'], ['hosts', 'Hosts'],
+  ['unique_clicks', 'Unique Clicks'], ['registrations', 'Registrations'],
+  ['first_deposit_count', 'First Deposits'], ['first_deposit_amount', 'First Deposit Amt'],
+  ['deposits_count', 'Deposits Count'], ['deposits', 'Deposits'],
+  ['withdrawals', 'Withdrawals'], ['GGR', 'GGR'], ['NGR', 'NGR'],
+  ['qual_cpa_count', 'Qual CPA'], ['currency_name', 'Currency']
+];
+
+function subIdVal(r) {
+  if (!r) return '';
+  const v = r.utm_sub_id !== undefined ? r.utm_sub_id : (r.sub_id !== undefined ? r.sub_id : r.subid);
+  return (v === undefined || v === null) ? '' : String(v).trim();
+}
+function hasSubId(rows) { return rows.some(r => subIdVal(r) !== ''); }
+
+async function scrapeSubId(c, df, dt) {
+  const base = (c.baseUrl || 'https://v.partners').replace(/\/+$/, '');
+  const token = c.token || c.username || c.email;
+
+  const monthly = spanDays(df, dt) > 62;
+  const ranges = monthly ? buildMonthChunks(df, dt) : [{ from: df, to: dt, label: '' }];
+
+  let variant = null, anyRows = false, all = [];
+
+  for (const ch of ranges) {
+    let rows = [];
+    if (variant === null) {
+      for (const v of SUBID_VARIANTS) {
+        let r = [];
+        try { r = await fetchStats(base, token, ch.from, ch.to, v); }
+        catch (e) { console.log('  -> SubID variant "' + v + '" failed: ' + e.message.substring(0, 80)); }
+        if (r.length) anyRows = true;
+        if (hasSubId(r)) {
+          variant = v; rows = r;
+          console.log('  -> V.Partners SubID variant mila: "' + (v || '(default)') + '"');
+          break;
+        }
+        await sleep(800);
+      }
+    } else {
+      try { rows = await fetchStats(base, token, ch.from, ch.to, variant); }
+      catch (e) { console.log('  -> ' + ch.label + ' failed: ' + e.message.substring(0, 80)); }
+    }
+    if (monthly) rows.forEach(r => { r.stats_date = ch.label; });
+    all = all.concat(rows);
+    if (monthly) await sleep(1000);
+  }
+
+  if (!all.length) {
+    console.log('  -> V.Partners SubID: no rows for ' + df + ' to ' + dt);
+    return { headers: ['Date', 'Brand', 'Sub ID', 'Unique Clicks', 'Registrations', 'First Deposits'], rows: [] };
+  }
+  if (variant === null) {
+    throw new Error('V.Partners SubID: API response me sub id column nahi mila (' + (anyRows ? 'rows aayi par sub id ke bina' : 'koi rows nahi') + '). Browser me /vp-raw?token=YOUR_TOKEN kholke output bhej.');
+  }
+
+  const keySet = new Set();
+  all.forEach(r => Object.keys(r).forEach(k => keySet.add(k)));
+  const seenLabels = new Set();
+  let cols = SUBID_COLS.filter(p => {
+    if (!keySet.has(p[0]) || seenLabels.has(p[1])) return false;
+    seenLabels.add(p[1]); return true;
+  });
+  if (!cols.length) cols = Array.from(keySet).map(k => [k, k]);
+
+  const headers = cols.map(c2 => c2[1]);
+  let rows = all.map(r => cols.map(c2 => {
+    const v = r[c2[0]];
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  }));
+
+  const dIdx = cols.findIndex(c2 => c2[0] === 'stats_date');
+
+  if (monthly) {
+    // month + brand + sub id ke hisaab se sum
+    const textKeys = ['stats_date', 'title', 'utm_sub_id', 'sub_id', 'currency_name'];
+    const keyIdxs = [];
+    cols.forEach((c2, i) => { if (textKeys.indexOf(c2[0]) >= 0) keyIdxs.push(i); });
+    const rateIdxs = new Set();
+    headers.forEach((h, i) => { if (keyIdxs.indexOf(i) < 0 && /(^cr$|rate|ratio|percent|%|avg|average|conversion)/i.test(String(h))) rateIdxs.add(i); });
+    rows = groupMonthlyBySub(rows, keyIdxs, rateIdxs);
+    if (dIdx >= 0) headers[dIdx] = 'Month';
+  } else if (dIdx >= 0) {
+    rows.sort((a, b) => String(a[dIdx]).localeCompare(String(b[dIdx])));
+  }
+
+  console.log('  -> V.Partners SubID ' + rows.length + ' rows');
+  return { headers, rows };
+}
+
+function groupMonthlyBySub(rows, keyIdxs, rateIdxs) {
+  const map = new Map();
+  rows.forEach(row => {
+    const k = keyIdxs.map(i => row[i]).join('|');
+    if (!map.has(k)) map.set(k, { base: row.slice(), sums: {}, cnt: {} });
+    const b = map.get(k);
+    row.forEach((v, i) => {
+      if (keyIdxs.indexOf(i) >= 0) return;
+      const n = parseFloat(String(v).replace(/[$€£,%]/g, ''));
+      if (!isNaN(n)) { b.sums[i] = (b.sums[i] || 0) + n; b.cnt[i] = (b.cnt[i] || 0) + 1; }
+    });
+  });
+  return Array.from(map.values()).map(b => b.base.map((v, i) => {
+    if (keyIdxs.indexOf(i) >= 0 || b.cnt[i] === undefined) return v;
+    let val = rateIdxs.has(i) ? b.sums[i] / b.cnt[i] : b.sums[i];
+    val = Math.round(val * 100) / 100;
+    return String(val);
+  }));
 }
 
 // ── Month grouping — "Jan 2026" labels ──
