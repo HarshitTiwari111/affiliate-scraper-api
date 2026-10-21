@@ -154,17 +154,20 @@ async function scrapeSubId(c, df, dt) {
   for (const ch of ranges) {
     let rows = [];
     if (variant === null) {
+      let best = null, bestCount = 0, bestRows = [];
       for (const v of SUBID_VARIANTS) {
         let r = [];
         try { r = await fetchStats(base, token, ch.from, ch.to, v); }
         catch (e) { console.log('  -> SubID variant "' + v + '" failed: ' + e.message.substring(0, 80)); }
         if (r.length) anyRows = true;
-        if (hasSubId(r)) {
-          variant = v; rows = r;
-          console.log('  -> V.Partners SubID variant mila: "' + (v || '(default)') + '"');
-          break;
-        }
+        const n = new Set(r.map(subIdVal).filter(x => x !== '')).size;
+        console.log('  -> SubID variant "' + (v || '(default)') + '": ' + r.length + ' rows, ' + n + ' distinct sub ids');
+        if (n > bestCount) { best = v; bestCount = n; bestRows = r; }
         await sleep(800);
+      }
+      if (best !== null) {
+        variant = best; rows = bestRows;
+        console.log('  -> V.Partners SubID variant chuna: "' + (best || '(default)') + '" (' + bestCount + ' sub ids)');
       }
     } else {
       try { rows = await fetchStats(base, token, ch.from, ch.to, variant); }
