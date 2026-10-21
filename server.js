@@ -213,7 +213,37 @@ app.get('/starz-promo', async (q, r) => {
     r.json(out);
   } catch (e) { r.json({ error: e.message }); }
 });
-
+app.get('/vp-raw', async (q, r) => {
+  try {
+    const token = q.query.token || '';
+    const from = q.query.from || '2026-10-01';
+    const to = q.query.to || '2026-10-21';
+    const find = q.query.find || 'iceitsy';
+    const variants = ['', '&group_by=utm_sub_id', '&group_by=sub_id', '&group=utm_sub_id', '&group=sub_id', '&type=sub_id', '&report=sub_id', '&breakdown=sub_id', '&tab=sub_id'];
+    const out = {};
+    for (const v of variants) {
+      const url = 'https://v.partners/api/stats?token=' + encodeURIComponent(token) + '&date_from=' + from + '&date_to=' + to + v;
+      try {
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } });
+        const body = await resp.text();
+        let n = 0, firstKeys = [];
+        try {
+          const d = JSON.parse(body);
+          const list = Array.isArray(d) ? d : Object.values(d).flatMap(x => Array.isArray(x) ? x : (x && typeof x === 'object' ? [x] : []));
+          n = list.length; firstKeys = list[0] ? Object.keys(list[0]) : [];
+        } catch (e) {}
+        const idx = body.toLowerCase().indexOf(find.toLowerCase());
+        out[v || '(default)'] = {
+          status: resp.status, length: body.length, rows: n, firstKeys,
+          foundTerm: idx >= 0,
+          snippet: idx >= 0 ? body.substring(Math.max(0, idx - 200), idx + 400) : ''
+        };
+      } catch (e) { out[v || '(default)'] = { error: e.message }; }
+      await new Promise(res => setTimeout(res, 1500));
+    }
+    r.json(out);
+  } catch (e) { r.json({ error: e.message }); }
+});
 app.post('/scrape', async (q, r) => {
   const { platform, dateFrom, dateTo, credentials } = q.body;
   if (!platform || !dateFrom || !dateTo || !credentials) {
