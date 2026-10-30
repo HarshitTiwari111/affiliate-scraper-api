@@ -146,45 +146,37 @@ async function scrapeSubId(c, df, dt) {
   const base = (c.baseUrl || 'https://v.partners').replace(/\/+$/, '');
   const token = c.token || c.username || c.email;
 
+  // Browser Network tab se mila hua exact SUB_ID path yahan aayega
+  const SUBID_PATH = c.subIdPath || '';   // Col H me  subIdPath:/api/xxxx  daal sakte ho
+
   const monthly = spanDays(df, dt) > 62;
   const ranges = monthly ? buildMonthChunks(df, dt) : [{ from: df, to: dt, label: '' }];
-
-  let variant = null, anyRows = false, all = [];
+  let all = [];
 
   for (const ch of ranges) {
     let rows = [];
-    if (variant === null) {
-      let best = null, bestCount = 0, bestRows = [];
-      for (const v of SUBID_VARIANTS) {
-        let r = [];
-        try { r = await fetchStats(base, token, ch.from, ch.to, v); }
-        catch (e) { console.log('  -> SubID variant "' + v + '" failed: ' + e.message.substring(0, 80)); }
-        if (r.length) anyRows = true;
-        const n = new Set(r.map(subIdVal).filter(x => x !== '')).size;
-        console.log('  -> SubID variant "' + (v || '(default)') + '": ' + r.length + ' rows, ' + n + ' distinct sub ids');
-        if (n > bestCount) { best = v; bestCount = n; bestRows = r; }
-        await sleep(800);
-      }
-      if (best !== null) {
-        variant = best; rows = bestRows;
-        console.log('  -> V.Partners SubID variant chuna: "' + (best || '(default)') + '" (' + bestCount + ' sub ids)');
-      }
+    if (SUBID_PATH) {
+      const url = base + SUBID_PATH
+        + (SUBID_PATH.indexOf('?') >= 0 ? '&' : '?')
+        + 'token=' + encodeURIComponent(token)
+        + '&date_from=' + encodeURIComponent(ch.from)
+        + '&date_to=' + encodeURIComponent(ch.to);
+      const resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } });
+      const body = await resp.text();
+      if (!resp.ok) throw new Error('V.Partners SubID failed (' + resp.status + '): ' + body.substring(0, 200));
+      let data;
+      try { data = JSON.parse(body); } catch (e) { throw new Error('SubID response JSON nahi: ' + body.substring(0, 200)); }
+      const list = Array.isArray(data) ? data : (data.data || data.rows || data.items || []);
+      rows = Array.isArray(list) ? list : [];
     } else {
-      try { rows = await fetchStats(base, token, ch.from, ch.to, variant); }
-      catch (e) { console.log('  -> ' + ch.label + ' failed: ' + e.message.substring(0, 80)); }
+      throw new Error('V.Partners SubID: Col H me subIdPath:/api/... set karo (Network tab se mila path).');
     }
     if (monthly) rows.forEach(r => { r.stats_date = ch.label; });
     all = all.concat(rows);
     if (monthly) await sleep(1000);
   }
 
-  if (!all.length) {
-    console.log('  -> V.Partners SubID: no rows for ' + df + ' to ' + dt);
-    return { headers: ['Date', 'Brand', 'Sub ID', 'Unique Clicks', 'Registrations', 'First Deposits'], rows: [] };
-  }
-  if (variant === null) {
-    throw new Error('V.Partners SubID: API response me sub id column nahi mila (' + (anyRows ? 'rows aayi par sub id ke bina' : 'koi rows nahi') + '). Browser me /vp-raw?token=YOUR_TOKEN kholke output bhej.');
-  }
+  if (!all.length) return { headers: ['Date', 'Brand', 'Sub ID', 'Unique Clicks', 'Registrations', 'First Deposits'], rows: [] };
 
   const keySet = new Set();
   all.forEach(r => Object.keys(r).forEach(k => keySet.add(k)));
@@ -204,9 +196,7 @@ async function scrapeSubId(c, df, dt) {
   }));
 
   const dIdx = cols.findIndex(c2 => c2[0] === 'stats_date');
-
   if (monthly) {
-    // month + brand + sub id ke hisaab se sum
     const textKeys = ['stats_date', 'title', 'utm_sub_id', 'sub_id', 'currency_name'];
     const keyIdxs = [];
     cols.forEach((c2, i) => { if (textKeys.indexOf(c2[0]) >= 0) keyIdxs.push(i); });
@@ -217,8 +207,6 @@ async function scrapeSubId(c, df, dt) {
   } else if (dIdx >= 0) {
     rows.sort((a, b) => String(a[dIdx]).localeCompare(String(b[dIdx])));
   }
-
-  console.log('  -> V.Partners SubID ' + rows.length + ' rows');
   return { headers, rows };
 }
 
