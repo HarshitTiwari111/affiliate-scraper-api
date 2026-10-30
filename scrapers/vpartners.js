@@ -144,69 +144,45 @@ function hasSubId(rows) { return rows.some(r => subIdVal(r) !== ''); }
 
 async function scrapeSubId(c, df, dt) {
   const base = (c.baseUrl || 'https://v.partners').replace(/\/+$/, '');
-  const token = c.token || c.username || c.email;
+  const cookie = c.password || '';   // Col J me browser ka Cookie header yahan aayega
+  if (!cookie) throw new Error('V.Partners SubID: Col J me browser ka Cookie daalo.');
 
-  // Browser Network tab se mila hua exact SUB_ID path yahan aayega
-  const SUBID_PATH = c.subIdPath || '';   // Col H me  subIdPath:/api/xxxx  daal sakte ho
+  const body = new URLSearchParams();
+  body.append('filters[tab]', 'subid');
+  body.append('filters[dateGroupBy]', 'day');
+  body.append('filters[dateFrom]', df);
+  body.append('filters[dateTo]', dt);
+  body.append('filters[trackerName]', '');
+  body.append('filters[geo][]', '');
+  body.append('filters[currencyId]', c.currencyId || '4');
+  body.append('filters[isEntry]', '0');
 
-  const monthly = spanDays(df, dt) > 62;
-  const ranges = monthly ? buildMonthChunks(df, dt) : [{ from: df, to: dt, label: '' }];
-  let all = [];
-
-  for (const ch of ranges) {
-    let rows = [];
-    if (SUBID_PATH) {
-      const url = base + SUBID_PATH
-        + (SUBID_PATH.indexOf('?') >= 0 ? '&' : '?')
-        + 'token=' + encodeURIComponent(token)
-        + '&date_from=' + encodeURIComponent(ch.from)
-        + '&date_to=' + encodeURIComponent(ch.to);
-      const resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } });
-      const body = await resp.text();
-      if (!resp.ok) throw new Error('V.Partners SubID failed (' + resp.status + '): ' + body.substring(0, 200));
-      let data;
-      try { data = JSON.parse(body); } catch (e) { throw new Error('SubID response JSON nahi: ' + body.substring(0, 200)); }
-      const list = Array.isArray(data) ? data : (data.data || data.rows || data.items || []);
-      rows = Array.isArray(list) ? list : [];
-    } else {
-      throw new Error('V.Partners SubID: Col H me subIdPath:/api/... set karo (Network tab se mila path).');
-    }
-    if (monthly) rows.forEach(r => { r.stats_date = ch.label; });
-    all = all.concat(rows);
-    if (monthly) await sleep(1000);
-  }
-
-  if (!all.length) return { headers: ['Date', 'Brand', 'Sub ID', 'Unique Clicks', 'Registrations', 'First Deposits'], rows: [] };
-
-  const keySet = new Set();
-  all.forEach(r => Object.keys(r).forEach(k => keySet.add(k)));
-  const seenLabels = new Set();
-  let cols = SUBID_COLS.filter(p => {
-    if (!keySet.has(p[0]) || seenLabels.has(p[1])) return false;
-    seenLabels.add(p[1]); return true;
+  const resp = await fetch(base + '/affiliate/statistic/ajaxGetReport/subid', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Origin': base,
+      'Referer': base + '/affiliate/statistics',
+      'Cookie': cookie,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    },
+    body: body.toString()
   });
-  if (!cols.length) cols = Array.from(keySet).map(k => [k, k]);
+  const text = await resp.text();
+  if (!resp.ok) throw new Error('V.Partners SubID failed (' + resp.status + '): ' + text.substring(0, 200));
 
-  const headers = cols.map(c2 => c2[1]);
-  let rows = all.map(r => cols.map(c2 => {
-    const v = r[c2[0]];
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'object') return JSON.stringify(v);
-    return String(v);
-  }));
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error('V.Partners SubID: JSON nahi aaya (cookie expire ya Cloudflare block): ' + text.substring(0, 150)); }
+  if (data.error && data.error.message) throw new Error('V.Partners SubID: ' + data.error.message);
 
-  const dIdx = cols.findIndex(c2 => c2[0] === 'stats_date');
-  if (monthly) {
-    const textKeys = ['stats_date', 'title', 'utm_sub_id', 'sub_id', 'currency_name'];
-    const keyIdxs = [];
-    cols.forEach((c2, i) => { if (textKeys.indexOf(c2[0]) >= 0) keyIdxs.push(i); });
-    const rateIdxs = new Set();
-    headers.forEach((h, i) => { if (keyIdxs.indexOf(i) < 0 && /(^cr$|rate|ratio|percent|%|avg|average|conversion)/i.test(String(h))) rateIdxs.add(i); });
-    rows = groupMonthlyBySub(rows, keyIdxs, rateIdxs);
-    if (dIdx >= 0) headers[dIdx] = 'Month';
-  } else if (dIdx >= 0) {
-    rows.sort((a, b) => String(a[dIdx]).localeCompare(String(b[dIdx])));
-  }
+  const headers = (data.header || []).map(h => h.label);
+  const list = Array.isArray(data.rows) ? data.rows : Object.values(data.rows || {});
+  const rows = list.map(r => (r.data || []).map(v => (v === null || v === undefined) ? '' : String(v)));
+
+  console.log('  -> V.Partners SubID ' + rows.length + ' sub ids');
   return { headers, rows };
 }
 
